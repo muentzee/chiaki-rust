@@ -11,13 +11,17 @@
 //! - [`ffmpeg`] — DLL-Suche/-Laden, tracing-Log-Bridge, schmale FFI-Bindings
 //! - [`decoder`] — Port von `lib/src/ffmpegdecoder.c` (H264/H265, NVDEC/D3D11VA/
 //!   Vulkan/Software, immer NV12-Ausgabe, NVDEC-aligned-height-Metadaten)
+//! - [`vsr`] — Port von `gui/src/vsrupscaler.cpp` (NVIDIA VFX SDK "VideoSuperRes",
+//!   dynamisch geladen, Windows-only, deaktiviert sich sauber ohne SDK)
 //! - [`opus`] — Port von `lib/src/opusdecoder.c`/`opusencoder.c` (+ Concealment)
 
 pub mod decoder;
 pub mod ffmpeg;
 pub mod opus;
+pub mod vsr;
 
 pub use decoder::{nv12_aligned_height, DecodedFrame, Decoder, FrameFormat, HwBackend, Plane};
+pub use vsr::{FrameBuf, VsrUpscaler};
 
 #[cfg(test)]
 pub(crate) mod test_setup {
@@ -48,6 +52,14 @@ pub(crate) mod test_setup {
                 std::env::set_var(
                     "CHIAKI_OPUS_DIR",
                     r"F:\projekte\chiaki-rust-remaster\chiaki-remaster-Win",
+                );
+            }
+            // VFX-SDK "VideoFX/bin" (NVVideoEffects.dll/NVCVImage.dll) — lädt
+            // auch ohne GPU; die GPU-Tests sind zusätzlich #[ignore].
+            if std::env::var_os("CHIAKI_VSR_SDK_DIR").is_none() {
+                std::env::set_var(
+                    "CHIAKI_VSR_SDK_DIR",
+                    r"F:\projekte\chiaki-rust-remaster\vfx_sdk\sdk\VideoFX\bin",
                 );
             }
         });

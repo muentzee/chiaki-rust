@@ -59,6 +59,10 @@ pub const SWS_BILINEAR: c_int = 2;
 
 /// `AV_HWDEVICE_TYPE_NONE` (enum AVHWDeviceType, hwcontext.h).
 pub const AV_HWDEVICE_TYPE_NONE: c_int = 0;
+/// `AV_HWDEVICE_TYPE_CUDA` (hwcontext.h, Referenz-Header n7.1 — Reihenfolge:
+/// NONE=0, VDPAU=1, CUDA=2, VAAPI=3, DXVA2=4, QSV=5, VIDEOTOOLBOX=6,
+/// D3D11VA=7, DRM=8, OPENCL=9, MEDIACODEC=10, VULKAN=11, D3D12VA=12).
+pub const AV_HWDEVICE_TYPE_CUDA: c_int = 2;
 
 // ---------------------------------------------------------------------------
 // Opaque Typen (nur als Pointer im Umlauf)
@@ -148,6 +152,32 @@ pub struct AVBufferRef {
     pub buffer: *mut AVBuffer,
     pub data: *mut u8,
     pub size: usize,
+}
+
+/// C: `typedef struct AVHWDeviceContext` (libavutil/hwcontext.h, avutil 59).
+/// Wird von `av_hwdevice_ctx_create` alloziert — auch hier nur eine View.
+#[repr(C)]
+pub struct AVHWDeviceContext {
+    pub av_class: *const AVClass,
+    /// enum AVHWDeviceType
+    pub type_: c_int,
+    /// `AVCUDADeviceContext*` bei CUDA ( siehe unten), sonst hwcontext-spezifisch.
+    pub hwctx: *mut c_void,
+    pub internal: *mut AVBufferRef,
+}
+
+/// C: `typedef struct AVCUDADeviceContext` (libavutil/hwcontext_cuda.h).
+/// Die ersten beiden Felder sind über alle FFmpeg-Versionen stabil (gleicher
+/// Kommentar wie im C++-Original `vsrupscaler.cpp`); CUDA-Typen CUcontext/
+/// CUstream sind opake Pointer.
+#[repr(C)]
+pub struct AVCUDADeviceContext {
+    /// CUcontext
+    pub cuda_ctx: *mut c_void,
+    /// CUstream
+    pub cuda_stream: *mut c_void,
+    /// AVCUDADeviceContextInternal*
+    pub internal: *mut c_void,
 }
 
 /// C: `typedef struct AVChannelLayout` (channel_layout.h) — Union u64/Pointer,

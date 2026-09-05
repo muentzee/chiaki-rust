@@ -8,3 +8,14 @@ license.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 chiaki-media.workspace = true
+gpui = "0.2.2"
+# RenderImage-Baukasten: `image::Frame`/`RgbaImage` muessen typidentisch mit der
+# von gpui 0.2.2 verwendeten `image`-Version (0.25.x) sein (kein Re-Export durch gpui).
+image = { version = "0.25", default-features = false }
+# Nur fuer das Spike-Binary (GetProcessTimes CPU-Last-Messung im sys-Modul);
+# Features kommen aus dem Workspace (bereits von chiaki-core/media kompiliert).
+windows = { workspace = true }
+
+[[bin]]
+name = "spike-s1"
+path = "src/bin/spike_s1.rs"

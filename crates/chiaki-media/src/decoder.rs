@@ -635,6 +635,49 @@ impl Decoder {
         self.hw_backend
     }
 
+    /// CUDA-Kontext des HW-Decoders (`AVCUDADeviceContext.cuda_ctx`) — für
+    /// kontextgebundene CUDA-Nutzer wie den VSR-Upscaler
+    /// ([`crate::vsr::VsrUpscaler::init`]).
+    ///
+    /// Im C++ (`vsrupscaler.cpp`) wird derselbe Kontext pro Frame aus
+    /// `AVFrame.hw_frames_ctx → AVHWFramesContext.device_ref →
+    /// AVHWDeviceContext.hwctx` gelesen; das ist dieselbe `AVHWDeviceContext`,
+    /// die dieser Decoder via `av_hwdevice_ctx_create` erzeugt und in
+    /// `hw_device_ctx` hält — wir lesen sie direkt und kontextunabhängig vom
+    /// ersten Frame. `None` ohne CUDA-HW-Backend (Software/D3D11VA/Vulkan).
+    pub fn cuda_context(&self) -> Option<*mut std::os::raw::c_void> {
+        self.cuda_hwctx().map(|h| h.cuda_ctx)
+    }
+
+    /// CUDA-Stream des HW-Decoders (`AVCUDADeviceContext.cuda_stream`) —
+    /// optional (FFmpeg nutzt den Default-Stream = NULL, VSR funktioniert
+    /// dann mit `cuda_stream = NULL`).
+    pub fn cuda_stream(&self) -> Option<*mut std::os::raw::c_void> {
+        self.cuda_hwctx().map(|h| h.cuda_stream)
+    }
+
+    /// `AVCUDADeviceContext`-View aus dem eigenen `hw_device_ctx`, nur bei
+    /// `AV_HWDEVICE_TYPE_CUDA` (D3D11VA/Vulkan-hwctx haben ein anderes Layout!).
+    fn cuda_hwctx(&self) -> Option<&sys::AVCUDADeviceContext> {
+        if self.hw_device_ctx.is_null() {
+            return None;
+        }
+        unsafe {
+            // SAFETY: hw_device_ctx lebt so lange wie der Decoder (Drop unref't
+            // es); data zeigt auf die von FFmpeg allozierte AVHWDeviceContext.
+            let dev = (*self.hw_device_ctx).data as *const sys::AVHWDeviceContext;
+            if dev.is_null() || (*dev).type_ != sys::AV_HWDEVICE_TYPE_CUDA {
+                return None;
+            }
+            let hwctx = (*dev).hwctx as *const sys::AVCUDADeviceContext;
+            if hwctx.is_null() {
+                None
+            } else {
+                Some(&*hwctx)
+            }
+        }
+    }
+
     /// Aktive HW-Nutzung (entscheidet über den Transfer-Pfad).
     fn is_hw(&self) -> bool {
         self.hw_backend.is_some()
