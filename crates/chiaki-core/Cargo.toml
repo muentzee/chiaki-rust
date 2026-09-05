@@ -1,0 +1,44 @@
+[package]
+name = "chiaki-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+prost.workspace = true
+bytes.workspace = true
+aes.workspace = true
+ctr.workspace = true
+cbc.workspace = true
+ecb.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+p256.workspace = true
+k256.workspace = true
+rand.workspace = true
+base64.workspace = true
+rust-ini.workspace = true
+url.workspace = true
+# Port von lib/src/sock.c: Plattform-Socket-Helper (UDP create, dontfrag, timeouts, broadcast)
+socket2 = "0.6"
+# D6-Prüfung: Byteidentität mit jerasure/GF(2^8) — siehe tests/fec_golden.rs
+reed-solomon-erasure = "6"
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[dev-dependencies]
+hex = "0.4"
+
+[build-dependencies]
+prost-build.workspace = true
+protoc-bin-vendored = "3"
+cc = "1"
+
+[features]
+default = []
+# test-harness compiles jerasure/gf-complete C code for golden FEC tests
+golden-fec = []

@@ -1,0 +1,19 @@
+[package]
+name = "chiaki-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "chiaki-cli"
+path = "src/main.rs"
+
+[dependencies]
+chiaki-core.workspace = true
+chiaki-remote.workspace = true
+chiaki-media.workspace = true
+chiaki-settings.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"

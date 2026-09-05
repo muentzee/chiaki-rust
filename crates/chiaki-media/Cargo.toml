@@ -1,0 +1,13 @@
+[package]
+name = "chiaki-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+hex = "0.4"
