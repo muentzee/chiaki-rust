@@ -7,3 +7,17 @@ license.workspace = true
 [dependencies]
 thiserror.workspace = true
 tracing.workspace = true
+chiaki-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+gilrs.workspace = true
+hidapi.workspace = true
+# unstable_ds4: DS4Report/DualShock4Wired::update (offiziell "under
+# development", funktional — siehe vigem.rs-Doku)
+vigem-client = { workspace = true, features = ["unstable_ds4"] }
+
+[target.'cfg(windows)'.dependencies]
+# Features sind additiv zu den Workspace-Features (Win32_Media_Audio ist schon
+# vorhanden und wird für die Haptics-Ausgabe via waveOut genutzt) — hier sind
+# keine zusätzlichen Features nötig.
+windows.workspace = true

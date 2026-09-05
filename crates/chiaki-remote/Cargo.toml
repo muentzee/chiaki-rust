@@ -16,3 +16,8 @@ ureq.workspace = true
 hmac.workspace = true
 sha1.workspace = true
 sha2.workspace = true
+# WebSocket (PSN-Push-Notifications) über rustls — gleiche TLS-Stack-Basis wie ureq
+rustls = "0.23"
+webpki-roots = "0.26"
+# SO_REUSEADDR / IP_TTL für die NAT-Probing-Sockets (check_candidates)
+socket2 = "0.6"

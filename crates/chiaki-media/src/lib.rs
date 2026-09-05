@@ -1,1 +1,55 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//! chiaki-media — FFmpeg/NVDEC-Videodekodierung + Opus-Audio über FFI.
+//!
+//! Windows-only. FFmpeg (avutil/avcodec/swscale) und libopus werden zur Laufzeit
+//! über `libloading` geladen — keine Linkzeit-Bindings, kein ffmpeg-sys. Alle
+//! unsicheren Bindings leben in den jeweiligen `sys`-Modulen; die Oberfläche
+//! bleibt safe (einzige Ausnahme: die echten Plane-Pointer in
+//! [`decoder::DecodedFrame`], siehe Lifetime-Vertrag dort).
+//!
+//! Module:
+//! - [`ffmpeg`] — DLL-Suche/-Laden, tracing-Log-Bridge, schmale FFI-Bindings
+//! - [`decoder`] — Port von `lib/src/ffmpegdecoder.c` (H264/H265, NVDEC/D3D11VA/
+//!   Vulkan/Software, immer NV12-Ausgabe, NVDEC-aligned-height-Metadaten)
+//! - [`opus`] — Port von `lib/src/opusdecoder.c`/`opusencoder.c` (+ Concealment)
 
+pub mod decoder;
+pub mod ffmpeg;
+pub mod opus;
+
+pub use decoder::{nv12_aligned_height, DecodedFrame, Decoder, FrameFormat, HwBackend, Plane};
+
+#[cfg(test)]
+pub(crate) mod test_setup {
+    use std::sync::Once;
+
+    static SETUP: Once = Once::new();
+
+    /// Setzt die Suchpfad-Umgebungsvariablen auf die lokalen Referenz-DLLs und
+    /// installiert einen tracing-Subscriber (Tests leben von den Logs), sofern
+    /// nichts anderes vorgegeben ist (Task-Vorgabe: Tests laufen gegen die
+    /// FFmpeg-Referenz-DLLs, Opus aus dem chiaki-remaster-Win-Ordner).
+    pub fn reference_dlls() {
+        SETUP.call_once(|| {
+            let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"));
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_test_writer()
+                .try_init();
+
+            if std::env::var_os("CHIAKI_FFMPEG_DIR").is_none() {
+                std::env::set_var(
+                    "CHIAKI_FFMPEG_DIR",
+                    r"F:\projekte\chiaki-rust-remaster\ffmpeg-n7.1-latest-win64-gpl-shared-7.1\bin",
+                );
+            }
+            if std::env::var_os("CHIAKI_OPUS_DIR").is_none() {
+                std::env::set_var(
+                    "CHIAKI_OPUS_DIR",
+                    r"F:\projekte\chiaki-rust-remaster\chiaki-remaster-Win",
+                );
+            }
+        });
+    }
+}

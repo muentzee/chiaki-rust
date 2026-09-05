@@ -8,6 +8,12 @@ license.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 bytes.workspace = true
+# ChiakiResult/ChiakiError/Codec — die Medien-API nutzt dieselben Fehlertypen wie core
+chiaki-core.workspace = true
+# FFmpeg/libopus werden zur Laufzeit geladen (keine Linkzeit-Bindings, kein ffmpeg-sys)
+libloading = "0.8"
+num_enum = "0.7"
 
 [dev-dependencies]
 hex = "0.4"
+tracing-subscriber.workspace = true
