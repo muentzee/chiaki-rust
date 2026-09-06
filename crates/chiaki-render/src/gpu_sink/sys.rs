@@ -48,10 +48,10 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetMessageW,
-    GetClientRect, PostMessageW, PostQuitMessage, RegisterClassExW, SetLayeredWindowAttributes,
-    SetTimer, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU,
-    HWND_BOTTOM, LWA_COLORKEY, MSG, SET_WINDOW_POS_FLAGS, SHOW_WINDOW_CMD, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, WINDOW_STYLE, WM_APP,
+    GetClientRect, IsWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW,
+    CS_VREDRAW, HMENU, HWND_BOTTOM, LWA_COLORKEY, MSG, SET_WINDOW_POS_FLAGS, SHOW_WINDOW_CMD,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, WINDOW_STYLE, WM_APP,
     WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
@@ -143,8 +143,21 @@ pub fn find_window_by_title(title: &str) -> Option<HWND> {
     unsafe { FindWindowW(PCWSTR::null(), PCWSTR(wide.as_ptr())).ok() }
 }
 
+/// Lebt das Fensterhandle noch? (`IsWindow`) — Guard für alle Follow-Tick-
+/// Fensteraufrufe gegen Teardown-Races: Overlay- und Sink-Fenster können
+/// zwischen `FindWindowW` und dem eigentlichen Aufruf verschwinden; auf
+/// toten HWNDs liefern SetWindowPos/ShowWindow/GetClientRect sonst
+/// ERROR_INVALID_WINDOW_HANDLE (0x80070578) bzw. harte Fehler.
+pub fn valid(hwnd: HWND) -> bool {
+    unsafe { IsWindow(hwnd).as_bool() }
+}
+
 /// Client-Bereich eines Fensters in Bildschirmkoordinaten (physische Pixel).
+/// `None`, wenn das Handle schon tot ist (Teardown-Race).
 pub fn client_rect_screen(hwnd: HWND) -> Option<(i32, i32, u32, u32)> {
+    if !valid(hwnd) {
+        return None;
+    }
     unsafe {
         let mut rc = RECT::default();
         GetClientRect(hwnd, &mut rc).ok()?;
@@ -161,28 +174,40 @@ pub fn client_rect_screen(hwnd: HWND) -> Option<(i32, i32, u32, u32)> {
 
 /// Positioniert `hwnd` an (x, y, w, h) und direkt UNTERHALB von `anchor`
 /// (gpui-Overlay-Fenster) in der Z-Ordnung (hAnchor precedes in Z-Order).
+/// No-Op, wenn eins der beiden Handles schon tot ist (Teardown-Race).
 ///
 /// # Safety
-/// `hwnd`/`anchor` müssen gültige Fensterhandles sein.
+/// `hwnd`/`anchor` müssen Fensterhandles sein (werden auf Gültigkeit geprüft).
 pub unsafe fn set_pos_below(hwnd: HWND, anchor: HWND, x: i32, y: i32, w: u32, h: u32) {
+    if !valid(hwnd) || !valid(anchor) {
+        return;
+    }
     let _ = SetWindowPos(hwnd, anchor, x, y, w as i32, h as i32, SWP_NOACTIVATE);
 }
 
-/// Versteckt das Fenster (Overlay-Fenster verschwunden).
+/// Versteckt das Fenster (Overlay-Fenster verschwunden). No-Op auf totem
+/// Handle (Teardown-Race).
 ///
 /// # Safety
-/// `hwnd` muss zum lebenden Sink-Fenster gehören.
+/// `hwnd` muss zum Sink-Fenster gehören (wird auf Gültigkeit geprüft).
 pub unsafe fn hide_window(hwnd: HWND) {
+    if !valid(hwnd) {
+        return;
+    }
     let flags: SET_WINDOW_POS_FLAGS = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
     let _ = SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, flags);
     let _ = ShowWindow(hwnd, SHOW_WINDOW_CMD(SW_HIDE.0));
 }
 
-/// Zeigt das Fenster wieder (ohne Fokus zu klauen).
+/// Zeigt das Fenster wieder (ohne Fokus zu klauen). No-Op auf totem Handle
+/// (Teardown-Race).
 ///
 /// # Safety
-/// `hwnd` muss zum lebenden Sink-Fenster gehören.
+/// `hwnd` muss zum Sink-Fenster gehören (wird auf Gültigkeit geprüft).
 pub unsafe fn show_window_no_activate(hwnd: HWND) {
+    if !valid(hwnd) {
+        return;
+    }
     let _ = ShowWindow(hwnd, SHOW_WINDOW_CMD(SW_SHOWNOACTIVATE.0));
 }
 

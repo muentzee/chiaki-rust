@@ -25,7 +25,6 @@ pub(crate) fn sections(
     };
     let audio_video = s.audio_video_disabled_raw().to_string();
     let streamer_mode = s.streamer_mode();
-    let automatic_connect = s.automatic_connect();
     let auto_discovery = s.discovery_enabled();
     let remote_play_ask = s.remote_play_ask();
     let add_steam_ask = s.add_steam_shortcut_ask();
@@ -102,17 +101,11 @@ pub(crate) fn sections(
         true,
         streamer_mode,
     ));
-    behaviour.push(toggle_row(
-        "general-automatic-connect",
-        "Automatically connect on discovery",
-        Some(
-            "Master switch \u{2014} connects automatically to the console marked \
-             \u{201C}Auto-Connect\u{201D} (see Consoles category)",
-        ),
-        "auto connect discovery",
-        true,
-        automatic_connect,
-    ));
+    // „Automatically connect on discovery“ (settings/automatic_connect)
+    // bewusst ENTFERNT: Auto-Connect beim App-Start wurde auf Benutzerwunsch
+    // zurückgebaut — der Client verbindet nur noch manuell per Klick. Der
+    // INI-Key bleibt als Kompatibilitätsspeicher ohne Funktion (siehe
+    // SETTINGS-AUDIT.md).
     behaviour.push(inactive(toggle_row(
         "general-auto-discovery",
         "Auto discovery",

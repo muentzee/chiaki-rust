@@ -935,6 +935,14 @@ impl VsrUpscaler {
         self.dst_rgba.as_deref().map(|img| img as *const NvCVImage)
     }
 
+    /// Diagnose: eigene Dimensionen des GPU-RGBA-Images (width/height/pitch).
+    pub fn gpu_rgba_dims(&self) -> Option<(u32, u32, i32)> {
+        self.active.then(|| {
+            let dst = self.dst_rgba.as_deref().expect("active implies dst");
+            (dst.width, dst.height, dst.pitch)
+        })
+    }
+
     /// VSR aus einem KOPIERTEN NV12-Frame (besessene Planes, z. B. der
     /// Media-Thread hält nur den neuesten Frame als NV12Frame). Layout:
     /// `y = data[0..y_stride*h]`, `uv = data[y_stride*h ..]`.

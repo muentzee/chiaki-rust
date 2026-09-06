@@ -129,6 +129,14 @@ struct SinkShared {
     device_ptr: Mutex<usize>,
     context_ptr: Mutex<usize>,
     bgra_tex_ptr: Mutex<usize>,
+    // COM-Referenzen (+1) auf dieselben Objekte — halten Device/Context/
+    // RGBA-Textur am Leben, solange ein Handle sie roh referenziert, AUCH
+    // wenn der Render-Thread schon beendet ist. Ohne diese Referenzen könnte
+    // der Media-Thread (D3D11VA-Decode/CUDA-Interop) beim Teardown-Race auf
+    // freigegebene Objekte zugreifen (stiller Absturz beim Trennen).
+    device_ref: Mutex<Option<windows::Win32::Graphics::Direct3D11::ID3D11Device>>,
+    context_ref: Mutex<Option<windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext>>,
+    bgra_ref: Mutex<Option<windows::Win32::Graphics::Direct3D11::ID3D11Texture2D>>,
 }
 
 // SAFETY: HWND/Pointer sind Werte; die Objekte dahinter leben, solange der
@@ -320,6 +328,9 @@ impl GpuSink {
             device_ptr: Mutex::new(0),
             context_ptr: Mutex::new(0),
             bgra_tex_ptr: Mutex::new(0),
+            device_ref: Mutex::new(None),
+            context_ref: Mutex::new(None),
+            bgra_ref: Mutex::new(None),
         });
 
         let shared_for_thread = Arc::clone(&shared);
@@ -376,7 +387,10 @@ impl Drop for GpuSink {
     fn drop(&mut self) {
         self.shared.stopping.store(true, Ordering::Relaxed);
         let hwnd = *self.shared.hwnd.lock().unwrap();
-        if hwnd != 0 {
+        // Stop-Nachricht nur an ein lebendes Fenster posten (IsWindow-Guard,
+        // siehe sys::valid) — nach Device-Lost kann der Render-Thread schon
+        // weg sein und das HWND mit ihm.
+        if hwnd != 0 && sys::valid(HWND(hwnd as isize as *mut _)) {
             unsafe { sys::post_stop(HWND(hwnd as isize as *mut _)) };
         }
         if let Some(thread) = self.thread.take() {
@@ -411,7 +425,7 @@ fn render_thread_entry(overlay_title: &str, width: u32, height: u32, shared: Arc
     match sys::create_window(width, height) {
         Ok(hwnd) => {
             *shared.hwnd.lock().unwrap() = hwnd.0 as isize;
-            render_thread(hwnd, overlay_title, shared);
+            render_thread(hwnd, overlay_title, width, height, shared);
         }
         Err(err) => {
             tracing::error!("GPU-Sink: Fenster-Erzeugung fehlgeschlagen: {err}");
@@ -420,13 +434,28 @@ fn render_thread_entry(overlay_title: &str, width: u32, height: u32, shared: Arc
     }
 }
 
-fn render_thread(hwnd: HWND, overlay_title: &str, shared: Arc<SinkShared>) {
-    // D3D11-Setup; die Input-Texturen folgen der ersten Frame-Größe.
-    let mut state = match build_state(hwnd, 1280, 720) {
+fn render_thread(
+    hwnd: HWND,
+    _overlay_title: &str, // via shared.overlay_title (Follow-Tick)
+    video_w: u32,
+    video_h: u32,
+    shared: Arc<SinkShared>,
+) {
+    // D3D11-Setup; die Input-Texturen bekommen die angeforderte Video-Größe
+    // (VSR: Output-Dims, sonst Stream-Dims). Vor dem Fix stand hier ein
+    // 1280x720-Hardcode — die BGRA-Interop-Textur war dann kleiner als der
+    // VSR-Output, der SDK-Transfer beschnitt ihn oben-links (2x/3x-Zoom-Bug).
+    let mut state = match build_state(hwnd, video_w, video_h) {
         Ok(state) => {
             *shared.device_ptr.lock().unwrap() = sys::device_raw(&state.d3d) as usize;
             *shared.context_ptr.lock().unwrap() = sys::context_raw(&state.d3d) as usize;
             *shared.bgra_tex_ptr.lock().unwrap() = state.rgba.texture.as_raw() as usize;
+            // COM-Referenzen (+1) im Shared-State: Handles (Media-Thread)
+            // halten Device/Context/RGBA-Textur so über das Render-Thread-
+            // Ende hinaus am Leben (Teardown-Race, siehe SinkShared).
+            *shared.device_ref.lock().unwrap() = Some(state.d3d.device.clone());
+            *shared.context_ref.lock().unwrap() = Some(state.d3d.context.clone());
+            *shared.bgra_ref.lock().unwrap() = Some(state.rgba.texture.clone());
             Some(state)
         }
         Err(err) => {
@@ -463,6 +492,10 @@ fn render_thread(hwnd: HWND, overlay_title: &str, shared: Arc<SinkShared>) {
             break; // WM_QUIT
         }
         sys::translate_and_dispatch(&msg);
+        // Stop-Flag VOR dem Follow-Tick prüfen: der Tick (Overlay-Geometrie/
+        // Z-Ordnung, sys::set_pos_below/hide_window/…) endet damit BEVOR der
+        // Teardown das Overlay-Fenster (gpui) oder das Sink-Fenster anrührt;
+        // die sys-Helfer prüfen zusätzlich selbst per IsWindow (sys::valid).
         if shared.stopping.load(Ordering::Relaxed) {
             break 'loop_;
         }
@@ -524,7 +557,7 @@ fn render_thread(hwnd: HWND, overlay_title: &str, shared: Arc<SinkShared>) {
                 ActiveSource::Nv12 => DrawSource::Nv12(&state.nv12.srv_y, &state.nv12.srv_uv),
                 ActiveSource::Rgba => DrawSource::Rgba(&state.rgba.srv),
             };
-            let desc = texture_size_of(&state.nv12.texture).unwrap_or((1280, 720));
+            let desc = active_texture_size(state).unwrap_or((1280, 720));
             let _ =
                 sys::draw_and_present(&state.d3d, &state.shaders, source, desc, zoom.into(), zoom_factor);
         }
@@ -537,8 +570,10 @@ fn render_thread(hwnd: HWND, overlay_title: &str, shared: Arc<SinkShared>) {
                 ActiveSource::Nv12 => DrawSource::Nv12(&state.nv12.srv_y, &state.nv12.srv_uv),
                 ActiveSource::Rgba => DrawSource::Rgba(&state.rgba.srv),
             };
-            // Video-Auflösung für den Letterbox-Viewport aus den Input-Texturen.
-            let desc = texture_size_of(&state.nv12.texture).unwrap_or((1280, 720));
+            // Video-Auflösung für den Letterbox-Viewport aus der Input-Textur
+            // der AKTUELLEN Quelle (RGBA-Pfad: die BGRA-Interop-Textur — nicht
+            // die NV12-Textur, die im Interop-Modus nie Frames sieht).
+            let desc = active_texture_size(state).unwrap_or((1280, 720));
             match sys::draw_and_present(&state.d3d, &state.shaders, source, desc, zoom.into(), zoom_factor) {
                 Ok(()) => {
                     shared.stats.frames_presented.fetch_add(1, Ordering::Relaxed);
@@ -631,6 +666,16 @@ fn texture_size_of(tex: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D) 
     let mut desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
     unsafe { tex.GetDesc(&mut desc) };
     Some((desc.Width, desc.Height))
+}
+
+/// Größe der Shader-Input-Textur der AKTUELLEN Quelle — Grundlage für die
+/// Letterbox-Mathe (`draw_and_present`). Im RGBA-Interop-Modus zählt die
+/// BGRA-Textur, nicht die NV12-Textur.
+fn active_texture_size(state: &RenderState) -> Option<(u32, u32)> {
+    match state.active_source {
+        ActiveSource::Nv12 => texture_size_of(&state.nv12.texture),
+        ActiveSource::Rgba => texture_size_of(&state.rgba.texture),
+    }
 }
 
 fn recreate_nv12(state: &mut RenderState, w: u32, h: u32) -> SysResult<()> {

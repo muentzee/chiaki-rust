@@ -6,7 +6,7 @@
 //! und lesen/schreiben direkt die Felder (`shell.route`, `shell.toasts`, …).
 //! Backend-Zugriff immer über `shell.backend`.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{
     div, px, App, Context, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
@@ -48,23 +48,6 @@ impl Route {
 }
 
 // ---------------------------------------------------------------------------
-// Auto-Connect (settings/automatic_connect + settings/auto_connect_mac)
-// ---------------------------------------------------------------------------
-
-/// Warte-Zustand des Auto-Connects beim App-Start (Port des
-/// automatic-connect-Zweigs in `QmlBackend::updateDiscoveryHosts`, ergänzt
-/// um das 5-s-Fenster aus dem Portierungsauftrag — das C++ wartet endlos).
-#[derive(Debug, Clone, Copy)]
-struct AutoConnectPending {
-    mac: [u8; 6],
-    deadline: Instant,
-}
-
-/// Wie lange nach dem Start auf einen Discovery-Treffer gewartet wird, bevor
-/// „Konsole nicht gefunden“ gemeldet wird.
-const AUTO_CONNECT_WAIT: Duration = Duration::from_secs(5);
-
-// ---------------------------------------------------------------------------
 // AppShell
 // ---------------------------------------------------------------------------
 
@@ -89,9 +72,6 @@ pub struct AppShell {
     pub shell_focus: FocusHandle,
     /// Fokus-Handles der NavRail-Einträge (parallel zu Route::nav_items()).
     pub rail_focus: Vec<FocusHandle>,
-    /// Auto-Connect beim App-Start läuft (settings/automatic_connect +
-    /// auto_connect_mac) — `Some` bis gefunden/Timeout.
-    auto_connect: Option<AutoConnectPending>,
 }
 
 impl AppShell {
@@ -99,7 +79,10 @@ impl AppShell {
         let rail_focus = (0..Route::nav_items().len()).map(|_| cx.focus_handle()).collect();
         // FAKE-Stream-Smoke (StreamView-Agent): mit `CHIAKI_UI_FAKE_STREAM=1`
         // startet die App direkt in der Stream-Ansicht (Testpattern ohne
-        // Konsole) —`=pin` fordert zusätzlich eine Fake-Login-PIN an.
+        // Konsole) —`=pin` fordert zusätzlich eine Fake-Login-PIN an. Ohne
+        // diese Env startet die App IMMER auf Home — Verbinden ist bewusst
+        // nur manuell per Klick (Auto-Connect beim Start wurde auf
+        // Benutzerwunsch entfernt; siehe SETTINGS-AUDIT.md).
         let initial_route = if std::env::var("CHIAKI_UI_FAKE_STREAM")
             .map(|v| !v.is_empty() && v != "0")
             .unwrap_or(false)
@@ -107,20 +90,6 @@ impl AppShell {
             Route::Stream(HostId::Address { host: "FAKE-STREAM".into() })
         } else {
             Route::Home
-        };
-
-        // Auto-Connect (C++ updateDiscoveryHosts automatic-connect-Zweig):
-        // settings/automatic_connect + registrierter auto_connect_mac → nach
-        // dem Start auf einen Discovery-Treffer warten (max. 5 s) und zur
-        // Stream-Ansicht schalten (die den Wake-/Connect-Flow trägt). Im
-        // FAKE-Stream-Smoke entfällt er bewusst.
-        let auto_connect = if !matches!(initial_route, Route::Stream(_)) {
-            let settings = backend.settings().lock().unwrap_or_else(|e| e.into_inner());
-            let mac = *settings.auto_connect_host().server_mac.mac();
-            (settings.automatic_connect() && mac != [0; 6])
-                .then_some(AutoConnectPending { mac, deadline: Instant::now() + AUTO_CONNECT_WAIT })
-        } else {
-            None
         };
 
         Self {
@@ -134,7 +103,6 @@ impl AppShell {
             next_toast_id: 1,
             shell_focus: cx.focus_handle(),
             rail_focus,
-            auto_connect,
         }
     }
 
@@ -286,10 +254,6 @@ impl AppShell {
 
     /// 1×/Frame: Backend-Event-Queue leeren und anwenden.
     pub fn apply_events(&mut self, cx: &mut Context<Self>) {
-        // Auto-Connect-Fenster prüfen (auch ohne Queue-Events — der Event-
-        // Loop tickt alle 100 ms).
-        self.tick_auto_connect(cx);
-
         let events = self.backend.poll_events();
         if events.is_empty() {
             return;
@@ -339,40 +303,6 @@ impl AppShell {
                     self.push_toast(toast, cx);
                 }
             }
-        }
-    }
-
-    /// Auto-Connect beim App-Start (siehe [`AutoConnectPending`]): sobald
-    /// Discovery den `auto_connect_mac`-Host meldet, zur Stream-Ansicht
-    /// schalten — die trägt Wake/Connecting/Session wie ein normaler
-    /// Verbindungs-Klick (StreamView-Agent). Nach Ablauf des 5-s-Fensters
-    /// ohne Treffer: Toast „Konsole nicht gefunden“ (Abweichung zum C++,
-    /// das endlos weiter wartet — bewusste Portierungsentscheidung).
-    fn tick_auto_connect(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.auto_connect else { return };
-        let found = self
-            .backend
-            .discovery()
-            .hosts()
-            .iter()
-            .any(|h| pages::home::mac_from_host_id(h.host_id.as_deref().unwrap_or("")) == Some(pending.mac));
-        if found {
-            self.auto_connect = None;
-            self.push_toast(
-                ToastData::new(crate::components::ToastKind::Info, "Auto-Connect")
-                    .message("Konsole gefunden — verbinde …"),
-                cx,
-            );
-            self.navigate(Route::Stream(HostId::Registered { mac: pending.mac }), cx);
-            return;
-        }
-        if Instant::now() >= pending.deadline {
-            self.auto_connect = None;
-            self.push_toast(
-                ToastData::new(crate::components::ToastKind::Warn, "Auto-Connect")
-                    .message("Konsole nicht gefunden"),
-                cx,
-            );
         }
     }
 

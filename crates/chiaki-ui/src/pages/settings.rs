@@ -540,7 +540,9 @@ pub(crate) fn toggle_row(
 fn set_bool(s: &mut chiaki_settings::settings::Settings, id: &str, value: bool) {
     match id {
         "general-streamer-mode" => s.set_streamer_mode(value),
-        "general-automatic-connect" => s.set_automatic_connect(value),
+        // "general-automatic-connect" entfernt: Auto-Connect beim Start ist
+        // auf Benutzerwunsch raus — settings/automatic_connect bleibt nur
+        // als INI-Kompatibilitätsspeicher ohne Funktion (SETTINGS-AUDIT.md).
         "general-auto-discovery" => s.set_discovery_enabled(value),
         "general-remote-play-ask" => s.set_remote_play_ask(value),
         "general-add-steam-shortcut-ask" => s.set_add_steam_shortcut_ask(value),

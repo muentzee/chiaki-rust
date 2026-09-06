@@ -12,6 +12,7 @@ pub mod psn;
 pub mod sessions;
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use chiaki_settings::settings::Settings;
 
@@ -118,6 +119,23 @@ impl Backend {
         self.sessions.stop_current();
         self.controllers.stop();
         self.discovery.stop();
+    }
+
+    /// Hartes, **synchrones** Herunterfahren mit Obergrenze (Fenster-Schluss):
+    /// Session + Media-Thread + GPU-Sink sauber beenden und darauf warten,
+    /// bevor der Aufrufer den Prozess enden lässt. Ein harter Exit während
+    /// D3D11/CUDA-Aufrufe noch laufen, crashed im DLL-Teardown (beobachteter
+    /// stiller Absturz beim Schließen während des Streams).
+    ///
+    /// Wird vom `on_window_should_close`-Hook gerufen (gpui gibt
+    /// `on_app_quit`-Futures nur 100 ms — dort bleibt es beim Best-Effort-
+    /// [`Self::shutdown`]).
+    pub fn shutdown_bounded(&self, timeout: Duration) {
+        self.sessions.stop_current();
+        self.sessions.wait_stopped(timeout);
+        self.controllers.stop();
+        self.discovery.stop();
+        tracing::info!("Backend heruntergefahren (Session-Teardown abgewartet)");
     }
 }
 

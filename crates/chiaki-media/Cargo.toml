@@ -19,3 +19,5 @@ cpal = "0.15"
 [dev-dependencies]
 hex = "0.4"
 tracing-subscriber.workspace = true
+# D3D11-Readback-Repro für den CUDA-Interop-Zoom-Bug (tests/vsr_interop_zoom.rs)
+windows.workspace = true

@@ -612,6 +612,11 @@ pub(crate) struct SessionShared {
     /// `Some` solange die Session läuft (gestoppt = None).
     pub session: Mutex<Option<Session>>,
     pub stop: AtomicBool,
+    /// Setzt der Join/Stop-Thread NACH Session-Stop/Media-Kanal-Schluss/
+    /// GPU-Sink-Drop. [`SessionManager::wait_stopped`] wartet darauf, damit
+    /// der Prozess nicht mitten im D3D11/CUDA-Teardown endet (stiller
+    /// Absturz beim App-Ende im Stream).
+    pub stop_done: AtomicBool,
     /// 1-Slot-Queue: neuester Annexb-Frame für den Media-Thread.
     pub video_slot: VideoSlot,
     /// Media-Thread-Kommandos (Audio/Haptics/Header/Connected/Mic).
@@ -773,6 +778,9 @@ pub struct SessionManager {
     /// existiert) — für den Abbruch (C++ `psnCancel` →
     /// `chiaki_holepunch_main_thread_cancel`).
     pending_holepunch: Arc<Mutex<Option<Arc<chiaki_remote::holepunch::HolepunchSession>>>>,
+    /// Shared-State der zuletzt gestoppten Session — [`Self::wait_stopped`]
+    /// wartet hierauf (App-Ende: Teardown abwarten, siehe Modul-Doku).
+    stopping: Arc<Mutex<Option<Arc<SessionShared>>>>,
 }
 
 impl SessionManager {
@@ -789,6 +797,7 @@ impl SessionManager {
             feedback: Arc::new(Mutex::new(None)),
             discovery,
             pending_holepunch: Arc::new(Mutex::new(None)),
+            stopping: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -926,6 +935,7 @@ impl SessionManager {
         let shared = Arc::new(SessionShared {
             session: Mutex::new(None),
             stop: AtomicBool::new(false),
+            stop_done: AtomicBool::new(false),
             video_slot: VideoSlot::new(),
             media_tx: Mutex::new(Some(media_tx)),
             keyboard: Mutex::new(keyboard),
@@ -996,6 +1006,8 @@ impl SessionManager {
                         reason_str: "Session beendet".to_string(),
                     },
                 });
+                // Teardown abgeschlossen — wait_stopped (App-Ende) läuft weiter.
+                shared_for_thread.stop_done.store(true, Ordering::SeqCst);
             })
             .ok(); // JoinHandle wird detachiert; Stopp läuft über das Stop-Flag.
         std::mem::forget(join);
@@ -1013,7 +1025,33 @@ impl SessionManager {
             holepunch.main_thread_cancel(true);
         }
         if let Some(active) = lock(self.current.lock()).take() {
+            // Shared-State für wait_stopped merken (App-Ende wartet darauf).
+            *lock(self.stopping.lock()) = Some(Arc::clone(&active.shared));
             active.request_stop();
+        }
+    }
+
+    /// Wartet bounded darauf, dass der Teardown der zuletzt gestoppten
+    /// Session komplett ist (Join/Stop-Thread setzt `stop_done` NACH
+    /// Session-Join, Media-Kanal-Schluss und GPU-Sink-Drop). Beim App-Ende
+    /// nötig, damit der Prozess nicht mitten in laufenden D3D11/CUDA-Aufrufen
+    /// endet — die DLLs sterben im Prozess-Teardown und crashen still
+    /// (beobachtet als hängenderloser Absturz beim Schließen im Stream).
+    /// Ohne gestoppte Session oder nach Timeout: sofort bzw. mit Warnung
+    /// zurück.
+    pub fn wait_stopped(&self, timeout: Duration) {
+        let Some(shared) = lock(self.stopping.lock()).clone() else {
+            return; // Nie eine Session gestoppt — nichts zu warten.
+        };
+        let started = std::time::Instant::now();
+        while !shared.stop_done.load(Ordering::SeqCst) {
+            if started.elapsed() >= timeout {
+                tracing::warn!(
+                    "Session-Teardown-Timeout nach {timeout:?} — Prozess-Ende läuft weiter"
+                );
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -1821,6 +1859,12 @@ struct MediaTimings {
                                 if let Some(gpu) = &gpu {
                                     if gpu.kind == GpuPathKind::CudaVsrInterop {
                                         if vsr_inited {
+                                            if let Some((w, h, pitch)) = up.gpu_rgba_dims() {
+                                                tracing::info!(
+                                                    "VSR GPU-RGBA-Output-Dims: {}x{} (pitch {})",
+                                                    w, h, pitch
+                                                );
+                                            }
                                             match CudaD3d11Interop::new(
                                                 ctx,
                                                 stream,

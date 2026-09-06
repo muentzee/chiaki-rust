@@ -101,9 +101,6 @@ pub struct CudaD3d11Interop {
     cuda_ctx: *mut c_void,
     cuda_stream: *mut c_void,
     image: Box<NvCVImage>,
-    /// Leerer Tmp-Buffer für die konvertierenden Transfers (SDK wächst ihn —
-    /// gleicher Mechanismus wie in vsr/mod.rs, transferTmp).
-    tmp: Box<NvCVImage>,
 }
 
 // SAFETY: Handles sind opaque; Nutzung ist über den interop_lock des Sinks
@@ -136,13 +133,17 @@ impl CudaD3d11Interop {
                     "Interop: NvCVImage_InitFromD3D11Texture fehlgeschlagen (status {st})"
                 ));
             }
-            tracing::info!("CUDA-D3D11-Interop: BGRA-Textur registriert (SDK-Pfad)");
+            tracing::info!(
+                "CUDA-D3D11-Interop: BGRA-Textur registriert (SDK-Pfad) — Interop-View {}x{} (pitch {})",
+                image.width,
+                image.height,
+                image.pitch
+            );
             Ok(CudaD3d11Interop {
                 api,
                 cuda_ctx,
                 cuda_stream,
                 image,
-                tmp: Box::new(NvCVImage::zeroed()),
             })
         }
     }
