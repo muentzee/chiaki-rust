@@ -48,9 +48,9 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetMessageW,
-    GetClientRect, IsWindow, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    GetClientRect, IsWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
     SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW,
-    CS_VREDRAW, HMENU, HWND_BOTTOM, LWA_COLORKEY, MSG, PM_REMOVE, SET_WINDOW_POS_FLAGS,
+    CS_VREDRAW, HMENU, HWND_BOTTOM, LWA_COLORKEY, MSG, SET_WINDOW_POS_FLAGS,
     SHOW_WINDOW_CMD, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
     WINDOW_STYLE, WM_APP, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
@@ -229,29 +229,6 @@ pub fn translate_and_dispatch(msg: &MSG) {
 /// `hwnd` muss zum lebenden Sink-Fenster gehören.
 pub unsafe fn post_frame(hwnd: HWND) {
     let _ = PostMessageW(hwnd, WM_APP_FRAME, WPARAM(0), LPARAM(0));
-}
-
-/// Entfernt alle bereits queueden WM_APP_FRAME-Nachrichten des Sink-Fensters
-/// und liefert die Anzahl (Burst-Collapse: bei ruckartig eintreffenden
-/// Frames presentet der Render-Thread nur den NEUESTEN Zustand statt jeden
-/// Ankunftszeitpunkt einzeln — gleiche Wirkung wie die C++-Render-Loop, die
-/// pro Display-Tick einmal zeichnet).
-///
-/// # Safety
-/// `hwnd` muss zum lebenden Sink-Fenster gehören.
-pub unsafe fn drain_frame_messages(hwnd: HWND) -> u32 {
-    let mut collapsed = 0;
-    let mut msg = MSG::default();
-    while PeekMessageW(
-        &mut msg,
-        hwnd,
-        WM_APP_FRAME,
-        WM_APP_FRAME,
-        PM_REMOVE,
-    ).as_bool() {
-        collapsed += 1;
-    }
-    collapsed
 }
 
 /// Stop-Nachricht posten (Owner-Drop → Render-Thread beendet sich).

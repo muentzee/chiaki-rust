@@ -18,7 +18,11 @@
 //! Alle von `settings` kommenden Größen sind wie im C++ **Bytes** von
 //! S16-PCM: Ring = `8 * audio_buffer_size`, Latenzgrenze = `3 *
 //! audio_buffer_size` ("Audio queue exceeded latency threshold"), Default
-//! 9600 = 50 ms @ 48 kHz stereo.
+//! 9600 = 50 ms @ 48 kHz stereo. Der Callback beginnt erst zu spielen,
+//! wenn `2 * audio_buffer_size` im Ring stehen (C++: Drain-Target der
+//! Device-Queue) und geht nach jedem Unterlauf wieder in die Prime-Phase —
+//! ohne das lief der Ring dauerhaft mit 10–30 ms Füllstand am
+//! Unterlauf-Anschlag (Messung 06.09.).
 
 use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -55,6 +59,9 @@ pub const SDL_MIX_MAXVOLUME: u32 = 128;
 /// Atomics, damit sie ohne Lock lesbar sind.
 struct SampleRing {
     state: Mutex<RingState>,
+    /// Zielvorfüllung in Samples, bevor der Callback zu spielen beginnt
+    /// (C++: Drain-Target = 2×buffer_size; 0 = Tests).
+    prefill: usize,
     /// In den Ring geschobene Samples (Producer-Gesamtmenge, Messung P1).
     pushed: AtomicU64,
     /// Vom Callback entnommene Samples (Konsument-Gesamtmenge, Messung P1).
@@ -73,10 +80,17 @@ struct RingState {
     write: usize,
     fill: usize,
     overflow_warned: bool,
+    /// Prime-Phase: Der Callback spielt Stille, bis `prefill` Samples im
+    /// Ring sind (C++: der Drain-Thread füllte die SDL-Device-Queue auf
+    /// 2×buffer auf, BEVOR SDL sie abspielt). Nach einem Unterlauf wird
+    /// neu geprimed — sonst läuft der Ring dauerhaft am Anschlag leer
+    /// (gemessen 06.09.: fill 10–30 ms, Underflows steigen stetig).
+    primed: bool,
 }
 
 impl SampleRing {
-    fn new(capacity_samples: usize) -> Self {
+    /// `prefill` = Zielvorfüllung in Samples (0 = sofort spielen, Tests).
+    fn new(capacity_samples: usize, prefill: usize) -> Self {
         SampleRing {
             state: Mutex::new(RingState {
                 buf: vec![0i16; capacity_samples],
@@ -84,7 +98,9 @@ impl SampleRing {
                 write: 0,
                 fill: 0,
                 overflow_warned: false,
+                primed: prefill == 0,
             }),
+            prefill,
             pushed: AtomicU64::new(0),
             pulled: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
@@ -132,6 +148,7 @@ impl SampleRing {
             state.write = 0;
             state.fill = 0;
             state.overflow_warned = false;
+            state.primed = false; // Clear → neu vorfüllen (siehe pull)
             self.clears.fetch_add(1, Ordering::Relaxed);
             tracing::warn!("Audio queue exceeded latency threshold, clearing queued audio");
         }
@@ -165,6 +182,10 @@ impl SampleRing {
         }
         state.write = (start + data.len()) % capacity;
         state.fill += data.len();
+        // Vorfüllung erreicht → der Callback darf ab jetzt entnehmen.
+        if state.fill >= self.prefill {
+            state.primed = true;
+        }
     }
 
     /// Port der Entnahme-Seite von `DrainAudioOutRingBuffer` (hier als
@@ -175,25 +196,41 @@ impl SampleRing {
     /// `audio_out_overflow_logged = false` zurück, sobald der Ring leer ist.
     fn pull(&self, out: &mut [i16]) -> usize {
         let mut done = 0;
+        let mut was_primed = true;
         if let Ok(mut state) = self.state.lock() {
             let capacity = state.buf.len();
             if capacity > 0 {
-                while done < out.len() && state.fill > 0 {
-                    let chunk = state.fill.min(out.len() - done).min(capacity - state.read);
-                    out[done..done + chunk]
-                        .copy_from_slice(&state.buf[state.read..state.read + chunk]);
-                    state.read = (state.read + chunk) % capacity;
-                    state.fill -= chunk;
-                    done += chunk;
-                }
-                if state.fill == 0 {
-                    state.overflow_warned = false;
+                // Prime-Phase (nach Start/Clear/Unterlauf): Stille spielen,
+                // bis die Vorfüllung steht — verhindert das dauerhafte
+                // Leerlaufen des Rings (C++: Drain füllte die Device-Queue
+                // erst an, bevor sie abgespielt wurde).
+                if !state.primed && state.fill < self.prefill {
+                    was_primed = false;
+                } else {
+                    while done < out.len() && state.fill > 0 {
+                        let chunk = state.fill.min(out.len() - done).min(capacity - state.read);
+                        out[done..done + chunk]
+                            .copy_from_slice(&state.buf[state.read..state.read + chunk]);
+                        state.read = (state.read + chunk) % capacity;
+                        state.fill -= chunk;
+                        done += chunk;
+                    }
+                    // Ring leer gespielt → Unterlauf: neu vorfüllen.
+                    if state.fill == 0 {
+                        state.primed = false;
+                        state.overflow_warned = false;
+                    } else {
+                        state.overflow_warned = false;
+                    }
                 }
             }
         }
         if done < out.len() {
             // Underflow → der Rest von `out` bleibt Stille (SDL-Verhalten).
-            self.underflows.fetch_add(1, Ordering::Relaxed);
+            // Während der Prime-Phase ist Stille gewollt — kein Underflow.
+            if was_primed {
+                self.underflows.fetch_add(1, Ordering::Relaxed);
+            }
         }
         self.pulled.fetch_add(done as u64, Ordering::Relaxed);
         done
@@ -299,8 +336,10 @@ impl AudioOutput {
         let shared = Arc::new(OutShared {
             // C++: ring_buf.resize(audio_buffer_size * 8) ist in BYTES — bei
             // S16 also 38400 Samples (nicht buffer_samples × 4: das wäre nur
-            // die halbe C++-Kapazität).
-            ring: SampleRing::new(buffer_samples * 8),
+            // die halbe C++-Kapazität). Vorfüllung = C++-Drain-Target
+            // (2×audio_buffer_size Bytes = 2×buffer_samples Samples), damit
+            // der Ring nicht dauerhaft am Leerlauf-Anschlag läuft.
+            ring: SampleRing::new(buffer_samples * 8, buffer_samples * 2),
             volume128: AtomicU32::new(SDL_MIX_MAXVOLUME),
             clear_threshold: (buffer_samples * 3) as u64, // C++: SDL_GetQueuedAudioSize > 3 * audio_buffer_size
             sample_rate,
@@ -563,7 +602,7 @@ mod tests {
     use super::*;
 
     fn ring(capacity: usize) -> SampleRing {
-        SampleRing::new(capacity)
+        SampleRing::new(capacity, 0)
     }
 
     #[test]
@@ -682,6 +721,68 @@ mod tests {
         assert_eq!(four, [2, 3, 4, 5]);
         // Leerlauf setzt die Warn-Flagge zurück (C++-Verhalten).
         assert!(!r.overflow_warned());
+    }
+
+    /// Prime-Phase: Mit Prefill spielt der Callback erst Stille, bis die
+    /// Vorfüllung steht; danach normal. Zähler: die Prime-Stille zählt
+    /// NICHT als Underflow — nur Stille bei laufendem Spiel (primed).
+    #[test]
+    fn ring_prefills_before_playing_and_reprimes_after_underrun() {
+        let r = SampleRing::new(16, 8);
+        let mut out = [0i16; 4];
+
+        // Unter der Vorfüllung: Stille, kein Underflow gezählt.
+        r.push(&[1, 2, 3, 4], 1000);
+        assert_eq!(r.pull(&mut out), 0);
+        assert_eq!(r.underflows.load(Ordering::Relaxed), 0);
+
+        // Vorfüllung erreicht (4 + 4 weitere = 8) → spielt alles raus.
+        r.push(&[5, 6, 7, 8], 1000);
+        assert_eq!(r.pull(&mut out), 4);
+        assert_eq!(out, [1, 2, 3, 4]);
+        assert_eq!(r.pull(&mut out), 4);
+        assert_eq!(out, [5, 6, 7, 8]);
+        // Leer gespielt → neu geprimed (Stille bis wieder 8 da sind).
+        assert_eq!(r.pull(&mut out), 0);
+        assert_eq!(r.underflows.load(Ordering::Relaxed), 0);
+        r.push(&[9, 10, 11, 12], 1000);
+        assert_eq!(r.pull(&mut out), 0, "unter Prefill wieder still");
+        r.push(&[13, 14, 15, 16], 1000);
+        assert_eq!(r.pull(&mut out), 4);
+        assert_eq!(out, [9, 10, 11, 12]);
+        assert_eq!(r.pull(&mut out), 4);
+        assert_eq!(out, [13, 14, 15, 16]);
+        assert_eq!(r.underflows.load(Ordering::Relaxed), 0);
+
+        // Echter Underflow IM Spiel: primed, aber der Ring hält weniger,
+        // als der Callback haben will → Stille-Rest wird gezählt.
+        r.push(&[17, 18, 19, 20], 1000);
+        r.push(&[21, 22, 23, 24], 1000); // fill=8 → primed
+        let mut big = [0i16; 16];
+        assert_eq!(r.pull(&mut big), 8);
+        assert_eq!(&big[..8], &[17, 18, 19, 20, 21, 22, 23, 24]);
+        assert_eq!(r.underflows.load(Ordering::Relaxed), 1);
+        // fill=0 → neu geprimed: weitere Stille zählt nicht mehr.
+        assert_eq!(r.pull(&mut big), 0);
+        assert_eq!(r.underflows.load(Ordering::Relaxed), 1);
+    }
+
+    /// Clear während der Prime-Phase: Fill-Reset → primed wird zurück-
+    /// gesetzt und es wird neu vorgefüllt, bevor wieder gespielt wird.
+    #[test]
+    fn ring_clear_resets_prime_state() {
+        let r = SampleRing::new(16, 8);
+        let mut out = [0i16; 2];
+        // fill=8 ≥ prefill → primed; dann 2 ziehen (fill=6).
+        r.push(&[1, 2, 3, 4], 4); // fill 4 > 4 ist false → kein Clear
+        r.push(&[5, 6, 7, 8], 4); // fill 8, kein Clear (8 > 4 false)
+        r.pull(&mut out);
+        // fill=10 > threshold 4 → CLEAR (fill=0, primed=false), dann push.
+        r.push(&[9, 10, 11, 12], 4);
+        assert_eq!(r.pull(&mut out), 0, "nach Clear wird neu geprimed");
+        r.push(&[13, 14, 15, 16], 4); // fill=8 ≥ 8 → primed
+        assert_eq!(r.pull(&mut out), 2);
+        assert_eq!(out, [9, 10]);
     }
 
     /// Stream-Test gegen das Standardgerät: Aufbau, 100 ms Audio in den

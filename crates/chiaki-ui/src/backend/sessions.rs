@@ -1931,7 +1931,62 @@ struct MediaTimings {
                                         tracing::error!("NV12-Kopie fehlgeschlagen: {err:?}")
                                     }
                                 }
+                            } else if frame.memory == FrameMemory::CudaDevice
+                                && vsr_inited
+                                && interop.is_some()
+                            {
+                                // VSR-Interop: **JEDEN** decodierten Frame sofort
+                                // auf die Sink-Textur schreiben. Die Raw-Pointer
+                                // gelten nur bis zum nächsten Decode — ein
+                                // Latest-Merge würde bei Burst-Ankunft (2–3
+                                // Frames in einem Durchlauf) Zwischenframes
+                                // verwerfen und die Anzeige-FPS unter die
+                                // Quellrate (~60) drücken. VSR+Interop sind pro
+                                // Frame ~2,3 ms und laufen hier in-Reihe.
+                                if let (Some(up), Some(inter), Some(gpu)) = (
+                                    vsr.as_mut(),
+                                    interop.as_mut(),
+                                    session.gpu.as_ref(),
+                                ) {
+                                    let t2 = std::time::Instant::now();
+                                    let ok = up.process_frame_gpu(
+                                        frame.planes[0].as_ptr() as *const std::os::raw::c_void,
+                                        frame.planes[0].stride,
+                                        frame.planes[1].as_ptr() as *const std::os::raw::c_void,
+                                        frame.planes[1].stride,
+                                        frame.width,
+                                        frame.height,
+                                        frame.pts,
+                                        frame.duration,
+                                        frame.frames_lost,
+                                        frame.recovered,
+                                    );
+                                    t.vsr_us += t2.elapsed().as_micros() as u64;
+                                    if ok {
+                                        if let Some(src_img) = up.gpu_rgba_image() {
+                                            let guard = gpu.interop_lock();
+                                            // SAFETY: src_img ist das SDK-GPU-Image
+                                            // (Decoder-Kontext, synchronisiert);
+                                            // D3D11 nutzt die Textur nicht
+                                            // (interop_lock gehalten).
+                                            let r = unsafe { inter.write_from(src_img) };
+                                            drop(guard);
+                                            if r.is_ok() {
+                                                gpu.submit_rgba_ready();
+                                                t.frames += 1;
+                                            } else {
+                                                tracing::warn!(
+                                                    "Interop-Schreibvorgang fehlgeschlagen: {:?}",
+                                                    r.err()
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                             } else {
+                                // D3D11Texture (Surface gilt bis zum nächsten
+                                // Decode, Kopie im Render-Thread) und
+                                // CudaDevice OHNE Interop: Latest-Merge.
                                 latest = Some(Latest::Raw(frame));
                             }
                         }
@@ -1950,10 +2005,11 @@ struct MediaTimings {
                 }
                 let gpu_handle = session.gpu.clone();
                 let gpu_active = gpu_handle.as_ref().is_some_and(|g| !g.is_lost());
-                let Some(latest) = latest else {
-                    continue;
-                };
-                match latest {
+                // CudaDevice+VSR-Frames wurden schon IN der Decode-Schleife
+                // angezeigt (per Frame) — `latest` enthält nur noch
+                // D3D11Texture/CPU-Frames und darf None sein.
+                if let Some(latest) = latest {
+                    match latest {
                     Latest::Raw(frame) => {
                         // GPU-Pfad: VSR→Interop (CUDA) oder Device-interne
                         // Kopie (D3D11VA). Ein RAW-Frame OHNE GPU-Pfad (nur
@@ -2079,6 +2135,7 @@ struct MediaTimings {
                             Some(gpu) if gpu_active => gpu.submit_cpu(out),
                             _ => session.presenter.set_frame(out),
                         }
+                    }
                     }
                 }
                 if t.frames > frames_before {

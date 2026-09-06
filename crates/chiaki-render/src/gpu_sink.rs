@@ -536,20 +536,11 @@ fn render_thread(
             continue;
         }
 
-        // Burst-Collapse: Bei ruckartiger Ankunft (Netzwerk-Burst → Media-
-        // Thread dekodiert 2–3 Frames hintereinander) queuen mehrere
-        // WM_APP_FRAMEs. Jede einzelne Present würde den Anzeigeabstand
-        // künstlich verkurzen (2 ms statt ~16 ms — sichtbares Judder);
-        // entfernt wird der Rest, es zählt der NEUESTE Slot-Inhalt.
-        if is_frame {
-            let collapsed = unsafe { sys::drain_frame_messages(hwnd) };
-            if collapsed > 0 {
-                shared
-                    .stats
-                    .burst_collapsed
-                    .fetch_add(u64::from(collapsed), Ordering::Relaxed);
-            }
-        }
+        // Kein Burst-Drain: Der Media-Thread meldet JEDEN angezeigten Frame
+        // (VSR-Interop schreibt pro Frame in die RGBA-Textur, siehe
+        // sessions.rs) — jede Nachricht ist ein eigenes Bild. Kollidiert das
+        // Zeichnen mit dem Schreibvorgang des nächsten Frames, serialisiert
+        // der interop_lock (unterhalb, RGBA-Quelle).
 
         // --- Follow-Tick: Overlay-Fenster verfolgen (Geometrie + Z-Ordnung).
         let mut follow_resized = false;
@@ -628,6 +619,14 @@ fn render_thread(
             // die NV12-Textur, die im Interop-Modus nie Frames sieht).
             let desc = active_texture_size(state).unwrap_or((1280, 720));
             let sync_interval = shared.vsync.load(Ordering::Relaxed) as u32;
+            // RGBA-Quelle: Zeichnen+Present unter interop_lock — der Media-
+            // Thread schreibt JEDEN Frame per CUDA-Interop in DIESE Textur;
+            // ohne Lock würde der nächste Schreibvorgang mitten im Draw
+            // laufen (Texture-Tear).
+            let _interop_guard = match state.active_source {
+                ActiveSource::Rgba => Some(shared.interop_lock.lock().unwrap()),
+                ActiveSource::Nv12 => None,
+            };
             match sys::draw_and_present(&state.d3d, &state.shaders, source, desc, zoom.into(), zoom_factor, sync_interval)
             {
                 Ok(()) => {
