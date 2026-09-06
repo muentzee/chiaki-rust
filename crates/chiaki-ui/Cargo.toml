@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 chiaki-core.workspace = true
+chiaki-remote.workspace = true
 chiaki-settings.workspace = true
 chiaki-media.workspace = true
 chiaki-render.workspace = true
@@ -13,3 +14,11 @@ chiaki-input.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# gpui 0.2.2 von crates.io (DirectX-11-Backend, im Spike S1 verifiziert —
+# siehe spike-s1-results.md). gpui re-exportiert das image-Crate nicht; die
+# image-Version in chiaki-render (0.25.x) muss typidentisch bleiben.
+gpui = "0.2.2"
+
+[[bin]]
+name = "chiaki-ui"
+path = "src/bin/chiaki_ui.rs"

@@ -7,6 +7,8 @@
 // - [`rudpsendbuffer`]: Port von lib/src/remote/rudpsendbuffer.c (Re-Transmits)
 // - [`holepunch`]: Port von lib/src/remote/holepunch.c (PSN-Holepunching)
 // - [`psn`]:   HTTP-Endpunkte/-Payloads aus holepunch.c gebündelt (ureq)
+// - [`psn_auth`]: Port von gui/src/psntoken.cpp + psnaccountid.cpp
+//              (PSN-OAuth2: Token-Tausch/Refresh, Account-ID)
 //
 // Windows-only; blocking I/O (std::thread, kein tokio), kein unsafe.
 
@@ -14,6 +16,7 @@
 
 pub mod holepunch;
 pub mod psn;
+pub mod psn_auth;
 pub mod rudp;
 pub mod rudpsendbuffer;
 pub mod stun;
@@ -23,6 +26,7 @@ pub use holepunch::{
     Candidate, CandidateType, ConnectionRequest, ConsoleType, DeviceInfo, HolepunchSession,
     PortType, RegistInfo, SessionMessage,
 };
+pub use psn_auth::{exchange_authorization_code, fetch_psn_account_id, refresh_psn_token, RefreshedPsnToken};
 pub use rudp::{Rudp, RudpMessage, RudpPacketType};
 pub use rudpsendbuffer::RudpSendBuffer;
 pub use stun::{StunServer, STUN_MAGIC_COOKIE};

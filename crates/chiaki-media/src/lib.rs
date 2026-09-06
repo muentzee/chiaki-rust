@@ -14,12 +14,17 @@
 //! - [`vsr`] — Port von `gui/src/vsrupscaler.cpp` (NVIDIA VFX SDK "VideoSuperRes",
 //!   dynamisch geladen, Windows-only, deaktiviert sich sauber ohne SDK)
 //! - [`opus`] — Port von `lib/src/opusdecoder.c`/`opusencoder.c` (+ Concealment)
+//! - [`audio`] — Port der SDL-Audio-Teile von `gui/src/streamsession.cpp` auf
+//!   cpal/WASAPI: Ausgabe ([`audio::AudioOutput`], Ring + Volume + Latenz-Stats)
+//!   und Mikrofon ([`audio::AudioInput`], Capture → Opus-40-Byte-Frames)
 
+pub mod audio;
 pub mod decoder;
 pub mod ffmpeg;
 pub mod opus;
 pub mod vsr;
 
+pub use audio::{AudioInput, AudioOutput};
 pub use decoder::{nv12_aligned_height, DecodedFrame, Decoder, FrameFormat, HwBackend, Plane};
 pub use vsr::{FrameBuf, VsrUpscaler};
 

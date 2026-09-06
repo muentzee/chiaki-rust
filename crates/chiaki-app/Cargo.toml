@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# lib+bin: die Steam-Shortcut-Verwaltung (src/steam.rs) liegt in der Library,
+# das Binary (src/main.rs) bleibt unberührt und kann sie später importieren.
+[lib]
+name = "chiaki_app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "chiaki"
 path = "src/main.rs"
@@ -18,3 +24,11 @@ chiaki-settings.workspace = true
 chiaki-ui.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+thiserror.workspace = true
+
+# Windows-Registry-Zugriff für die Steam-Installationssuche (HKCU\Software\Valve\Steam\SteamPath).
+# Entscheidung: winreg statt windows-crate (windows.workspace = true + Feature
+# "Win32_System_Registry") — deutlich einfachere API und kein unsafe nötig
+# (CONVENTIONS.md: kein unsafe, außer wo unvermeidbar).
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
