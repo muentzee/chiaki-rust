@@ -260,6 +260,10 @@ pub struct StreamSnapshot {
 
 /// Das Stream-UI-Global (siehe Modul-Doku).
 pub struct StreamUiState {
+    /// Render-Rate-Cap: Zeitpunkt des letzten Seiten-Renderings.
+    pub last_render: std::time::Instant,
+    /// Läuft gerade ein Throttle-Timer (nur EINER, sonst Timer-Schwärme).
+    pub throttle_timer_pending: bool,
     pub host_id: HostId,
     pub host_label: String,
     pub fake: bool,
@@ -336,6 +340,8 @@ impl StreamUiState {
             backend,
             focus: cx.focus_handle(),
             want_fullscreen: false,
+            last_render: std::time::Instant::now(),
+            throttle_timer_pending: false,
             presenter: None,
             telemetry: None,
             request: None,

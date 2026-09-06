@@ -47,12 +47,43 @@ pub fn page(
     window: &mut Window,
     cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
-    // Video-/Input-Loop: gpui-dokumentierter Pfad für kontinuierliches
-    // Repainting (spike-s1-results.md „API-Annahmen").
-    window.request_animation_frame();
-
     let _created = state::ensure_and_tick(shell, host.clone(), window, cx);
     cx.notify(); // Loop am Laufen halten (Repaint → RAF → Render …)
+    // Video-/Input-Loop: gpui-dokumentierter Pfad für kontinuierliches
+    // Repainting (spike-s1-results.md „API-Annahmen"). Render-Rate-Cap:
+    // auf 240-Hz-Monitoren frisst jedes RAF eine komplette Szenen-Renderung
+    // (~4 ms Budget!), die mit Decode/VSR um CPU/GPU konkurriert und
+    // präsentierte FPS kostet. ~80 Hz reichen für 60-fps-Video.
+    let (request_raf, wait) = {
+        let state = cx.global::<StreamUiState>();
+        let elapsed = state.last_render.elapsed();
+        if elapsed >= std::time::Duration::from_millis(12) {
+            (true, None)
+        } else {
+            (false, Some(std::time::Duration::from_millis(12) - elapsed))
+        }
+    };
+    {
+        let state = cx.global_mut::<StreamUiState>();
+        state.last_render = std::time::Instant::now();
+        if request_raf {
+            window.request_animation_frame();
+        } else if wait.is_some() && !state.throttle_timer_pending {
+            state.throttle_timer_pending = true;
+            let shell = cx.entity().downgrade();
+            let wait = wait.unwrap();
+            cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(wait).await;
+                let _ = shell.update(cx, |_shell, cx| {
+                    if cx.try_global::<state::StreamUiState>().is_some() {
+                        cx.global_mut::<state::StreamUiState>().throttle_timer_pending = false;
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
 
     // State-Daten holen (kurze Borrows; danach folgt der Elementbau mit
     // cx.listener, das &mut cx braucht).

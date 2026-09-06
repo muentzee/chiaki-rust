@@ -1445,6 +1445,10 @@ struct MediaTimings {
         let mut vsr_inited = false;
         let mut vsr_buf = FrameBuf::new();
         let mut t = MediaTimings::default();
+        let mut prev_presented: u64 = 0;
+        let mut prev_generated: u64 = 0;
+        let mut prev_dropped: u64 = 0;
+        let mut prev_slot_dropped: u64 = 0;
 
         // --- Audio (OpusDecoder + Output entstehen mit dem AudioHeader) ---
         let mut opus = OpusAudioDecoder::new();
@@ -1687,15 +1691,25 @@ struct MediaTimings {
                 t.frames += 1;
                 if t.frames % 300 == 0 {
                     let n = t.frames.max(1) as f64;
+                    let snap = session.presenter.stats();
+                    let slot_dropped = session.shared_video_slot().dropped();
                     tracing::info!(
-                        "Media-Pipeline (Ø über {} Frames, {} Samples, Slot-Drops {}): decode {:.2} ms, nv12-copy {:.2} ms, vsr {:.2} ms, out-take {:.2} ms — Summe {:.2} ms/Frame (Budget 16,7)",
-                        t.frames, t.samples, session.shared_video_slot().dropped(),
+                        "Media-Pipeline (Ø über {} Frames, {} Samples): decode {:.2} ms, nv12-copy {:.2} ms, vsr {:.2} ms, out-take {:.2} ms — Summe {:.2} ms/Frame (Budget 16,7) | Presenter Δ: gen {}, präsentiert {}, UI-Drops {}, Slot-Drops {}",
+                        t.frames, t.samples,
                         t.decode_us as f64 / n / 1000.0,
                         t.nv12_copy_us as f64 / n / 1000.0,
                         t.vsr_us as f64 / n / 1000.0,
                         t.out_copy_us as f64 / n / 1000.0,
                         (t.decode_us + t.nv12_copy_us + t.vsr_us + t.out_copy_us) as f64 / n / 1000.0,
+                        snap.frames_generated.saturating_sub(prev_generated),
+                        snap.frames_presented.saturating_sub(prev_presented),
+                        snap.frames_dropped.saturating_sub(prev_dropped),
+                        slot_dropped.saturating_sub(prev_slot_dropped),
                     );
+                    prev_presented = snap.frames_presented;
+                    prev_generated = snap.frames_generated;
+                    prev_dropped = snap.frames_dropped;
+                    prev_slot_dropped = slot_dropped;
                 }
                 session.presenter.set_frame(out);
             }

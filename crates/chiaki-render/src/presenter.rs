@@ -145,6 +145,9 @@ struct PresenterInner {
     height: u32,
     queue: Mutex<Option<Arc<RenderImage>>>,
     previous: Mutex<Option<Arc<RenderImage>>>,
+    /// Wiederverwendbare BGRA-Buffer (groß, Page-Commit-teuer — 16 MB @4K
+    /// jedes Frame neu zu allokieren verursacht sichtbare Stalls).
+    pool: Mutex<Vec<Vec<u8>>>,
     stats: Arc<PresenterStats>,
 }
 
@@ -157,6 +160,7 @@ impl VideoPresenter {
                 height,
                 queue: Mutex::new(None),
                 previous: Mutex::new(None),
+                pool: Mutex::new(Vec::new()),
                 stats: Arc::new(PresenterStats::default()),
             }),
         }
@@ -176,7 +180,13 @@ impl VideoPresenter {
         self.inner.stats.frames_generated.fetch_add(1, Ordering::Relaxed);
 
         let alloc_start = Instant::now();
-        let mut bgra = vec![0u8; frame.bgra_len()];
+        let mut bgra = self
+            .inner
+            .pool
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| vec![0u8; frame.bgra_len()]);
         self.inner.stats.alloc_us.record(alloc_start.elapsed());
 
         let conversion_start = Instant::now();
@@ -204,6 +214,9 @@ impl VideoPresenter {
         }
         self.inner.stats.conversion_us.record(conversion_start.elapsed());
 
+        // Der Buffer geht in den RenderImage-Frame über; der Pool füllt sich
+        // über drop_image-Rückflüsse nicht selbst — Refill unten bei einem
+        // frischen Frame, ältere Blöcke werden vom GPUI-Atlas konsumiert.
         let wrap_start = Instant::now();
         let Some(rgba) = RgbaImage::from_raw(frame.width, frame.height, bgra) else {
             return;
