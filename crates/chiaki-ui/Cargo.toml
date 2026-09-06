@@ -8,6 +8,7 @@ license.workspace = true
 chiaki-core.workspace = true
 chiaki-remote.workspace = true
 chiaki-settings.workspace = true
+chiaki-steam.workspace = true
 chiaki-media.workspace = true
 chiaki-render.workspace = true
 chiaki-input.workspace = true

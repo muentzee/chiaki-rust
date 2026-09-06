@@ -38,7 +38,7 @@
 
 pub mod sys;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -92,6 +92,14 @@ pub struct SinkStats {
     pub rgba_presents: AtomicU64,
     pub resizes: AtomicU64,
     pub last_draw_us: AtomicU64,
+    /// Durch Burst-Collapse entfernte Frame-Nachrichten (zwei Frames kamen
+    /// zusammen an; der neuere hätte den älteren sofort verdrängt).
+    pub burst_collapsed: AtomicU64,
+    /// Presents, die < 4 ms nach dem vorherigen erfolgten (Kadenz-Verletzung
+    /// gegenüber 60 fps — Ursache für sichtbares Mikro-Ruckeln).
+    pub present_too_fast: AtomicU64,
+    /// EMA des Present-Abstands in µs (Render-Thread schreibt).
+    pub present_dt_ema_us: AtomicU32,
 }
 
 /// Werte-Snapshot der Sink-Statistik.
@@ -104,6 +112,9 @@ pub struct SinkStatsValues {
     pub rgba_presents: u64,
     pub resizes: u64,
     pub last_draw_us: u64,
+    pub burst_collapsed: u64,
+    pub present_too_fast: u64,
+    pub present_dt_ema_us: u32,
 }
 
 /// Geteilter Zustand zwischen Owner/Media-Thread und Render-Thread.
@@ -121,6 +132,8 @@ struct SinkShared {
     /// Serialisiert CUDA-Interop-Mapping (Media-Thread) gegen das Zeichnen
     /// (Render-Thread) auf der BGRA-Textur.
     interop_lock: Mutex<()>,
+    /// settings/vsync: Present mit SyncInterval 1 (Display-Takt) statt 0.
+    vsync: AtomicBool,
     stats: SinkStats,
     lost: AtomicBool,
     stopping: AtomicBool,
@@ -256,6 +269,11 @@ impl GpuSinkHandle {
         self.shared.lost.load(Ordering::Relaxed)
     }
 
+    /// settings/vsync zur Laufzeit umschalten (wirkt ab dem nächsten Present).
+    pub fn set_vsync(&self, vsync: bool) {
+        self.shared.vsync.store(vsync, Ordering::Relaxed);
+    }
+
     /// Statistik-Snapshot über das Handle (der Owner-Sink darf schon gedroppt
     /// sein — die Zähler leben im Arc weiter).
     pub fn stats_values(&self) -> SinkStatsValues {
@@ -268,6 +286,9 @@ impl GpuSinkHandle {
             rgba_presents: s.rgba_presents.load(Ordering::Relaxed),
             resizes: s.resizes.load(Ordering::Relaxed),
             last_draw_us: s.last_draw_us.load(Ordering::Relaxed),
+            burst_collapsed: s.burst_collapsed.load(Ordering::Relaxed),
+            present_too_fast: s.present_too_fast.load(Ordering::Relaxed),
+            present_dt_ema_us: s.present_dt_ema_us.load(Ordering::Relaxed),
         }
     }
 
@@ -313,7 +334,9 @@ impl GpuSink {
     /// `overlay_title` = exakter Titel des gpui-Fensters, dem gefolgt wird
     /// (Position/Größe/Z-Ordnung). `video_size` = Auflösung der Video-Quelle
     /// (NV12/BGRA-Input-Texturen; wird beim Auflösungswechsel neu gebaut).
-    pub fn new(overlay_title: &str, video_size: (u32, u32)) -> SysResult<GpuSink> {
+    /// `vsync` = settings/vsync: Present am Display-Takt (SyncInterval 1)
+    /// statt ohne Sync.
+    pub fn new(overlay_title: &str, video_size: (u32, u32), vsync: bool) -> SysResult<GpuSink> {
         let (width, height) = (video_size.0.max(2), video_size.1.max(2));
         let shared = Arc::new(SinkShared {
             hwnd: Mutex::new(0),
@@ -322,6 +345,7 @@ impl GpuSink {
             zoom_factor: Mutex::new(0.0),
             slot: Mutex::new(None),
             interop_lock: Mutex::new(()),
+            vsync: AtomicBool::new(vsync),
             stats: SinkStats::default(),
             lost: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
@@ -375,6 +399,9 @@ impl GpuSink {
             rgba_presents: s.rgba_presents.load(Ordering::Relaxed),
             resizes: s.resizes.load(Ordering::Relaxed),
             last_draw_us: s.last_draw_us.load(Ordering::Relaxed),
+            burst_collapsed: s.burst_collapsed.load(Ordering::Relaxed),
+            present_too_fast: s.present_too_fast.load(Ordering::Relaxed),
+            present_dt_ema_us: s.present_dt_ema_us.load(Ordering::Relaxed),
         }
     }
 
@@ -481,11 +508,15 @@ fn render_thread(
             texture_size_of(&state.nv12.texture).unwrap_or((1280, 720)),
             zoom.into(),
             zoom_factor,
+            0,
         );
     }
 
     let mut msg = MSG::default();
     let mut follow_visible = false;
+    // Present-Kadenz-Buchhaltung (Render-Thread-lokal).
+    let mut last_present: Option<Instant> = None;
+    let mut present_dt_ema_us: u64 = 0;
     'loop_: loop {
         // Blockierend auf Nachrichten; WM_APP_FRAME/WM_TIMER/WM_APP_STOP.
         if !sys::get_message(&mut msg) {
@@ -503,6 +534,21 @@ fn render_thread(
         let is_timer = msg.message == windows::Win32::UI::WindowsAndMessaging::WM_TIMER;
         if !is_frame && !is_timer {
             continue;
+        }
+
+        // Burst-Collapse: Bei ruckartiger Ankunft (Netzwerk-Burst → Media-
+        // Thread dekodiert 2–3 Frames hintereinander) queuen mehrere
+        // WM_APP_FRAMEs. Jede einzelne Present würde den Anzeigeabstand
+        // künstlich verkurzen (2 ms statt ~16 ms — sichtbares Judder);
+        // entfernt wird der Rest, es zählt der NEUESTE Slot-Inhalt.
+        if is_frame {
+            let collapsed = unsafe { sys::drain_frame_messages(hwnd) };
+            if collapsed > 0 {
+                shared
+                    .stats
+                    .burst_collapsed
+                    .fetch_add(u64::from(collapsed), Ordering::Relaxed);
+            }
         }
 
         // --- Follow-Tick: Overlay-Fenster verfolgen (Geometrie + Z-Ordnung).
@@ -558,8 +604,15 @@ fn render_thread(
                 ActiveSource::Rgba => DrawSource::Rgba(&state.rgba.srv),
             };
             let desc = active_texture_size(state).unwrap_or((1280, 720));
-            let _ =
-                sys::draw_and_present(&state.d3d, &state.shaders, source, desc, zoom.into(), zoom_factor);
+            let _ = sys::draw_and_present(
+                &state.d3d,
+                &state.shaders,
+                source,
+                desc,
+                zoom.into(),
+                zoom_factor,
+                shared.vsync.load(Ordering::Relaxed) as u32,
+            );
         }
 
         if dirty {
@@ -574,11 +627,32 @@ fn render_thread(
             // der AKTUELLEN Quelle (RGBA-Pfad: die BGRA-Interop-Textur — nicht
             // die NV12-Textur, die im Interop-Modus nie Frames sieht).
             let desc = active_texture_size(state).unwrap_or((1280, 720));
-            match sys::draw_and_present(&state.d3d, &state.shaders, source, desc, zoom.into(), zoom_factor) {
+            let sync_interval = shared.vsync.load(Ordering::Relaxed) as u32;
+            match sys::draw_and_present(&state.d3d, &state.shaders, source, desc, zoom.into(), zoom_factor, sync_interval)
+            {
                 Ok(()) => {
                     shared.stats.frames_presented.fetch_add(1, Ordering::Relaxed);
                     let us = started.elapsed().as_micros() as u64;
                     shared.stats.last_draw_us.store(us, Ordering::Relaxed);
+                    // Kadenz: Present-Abstand messen (Pace-Jitter ist die
+                    // sichtbare Größe bei Mikro-Ruckeln — Logs im Debug-Overlay).
+                    let now = Instant::now();
+                    if let Some(prev) = last_present {
+                        let dt_us = now.duration_since(prev).as_micros() as u64;
+                        present_dt_ema_us = if present_dt_ema_us == 0 {
+                            dt_us
+                        } else {
+                            present_dt_ema_us * 9 / 10 + dt_us / 10
+                        };
+                        shared
+                            .stats
+                            .present_dt_ema_us
+                            .store(present_dt_ema_us.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+                        if dt_us < 4000 {
+                            shared.stats.present_too_fast.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    last_present = Some(now);
                 }
                 Err(err) => {
                     tracing::error!("GPU-Sink: Draw/Present fehlgeschlagen: {err}");

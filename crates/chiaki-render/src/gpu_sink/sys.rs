@@ -48,11 +48,11 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetMessageW,
-    GetClientRect, IsWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
+    GetClientRect, IsWindow, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW,
     SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW,
-    CS_VREDRAW, HMENU, HWND_BOTTOM, LWA_COLORKEY, MSG, SET_WINDOW_POS_FLAGS, SHOW_WINDOW_CMD,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, WINDOW_STYLE, WM_APP,
-    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    CS_VREDRAW, HMENU, HWND_BOTTOM, LWA_COLORKEY, MSG, PM_REMOVE, SET_WINDOW_POS_FLAGS,
+    SHOW_WINDOW_CMD, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
+    WINDOW_STYLE, WM_APP, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 /// Fehler-Typ der sys-Schicht (win32/d3d11 — HRESULTs bzw. Meldungen).
@@ -229,6 +229,29 @@ pub fn translate_and_dispatch(msg: &MSG) {
 /// `hwnd` muss zum lebenden Sink-Fenster gehören.
 pub unsafe fn post_frame(hwnd: HWND) {
     let _ = PostMessageW(hwnd, WM_APP_FRAME, WPARAM(0), LPARAM(0));
+}
+
+/// Entfernt alle bereits queueden WM_APP_FRAME-Nachrichten des Sink-Fensters
+/// und liefert die Anzahl (Burst-Collapse: bei ruckartig eintreffenden
+/// Frames presentet der Render-Thread nur den NEUESTEN Zustand statt jeden
+/// Ankunftszeitpunkt einzeln — gleiche Wirkung wie die C++-Render-Loop, die
+/// pro Display-Tick einmal zeichnet).
+///
+/// # Safety
+/// `hwnd` muss zum lebenden Sink-Fenster gehören.
+pub unsafe fn drain_frame_messages(hwnd: HWND) -> u32 {
+    let mut collapsed = 0;
+    let mut msg = MSG::default();
+    while PeekMessageW(
+        &mut msg,
+        hwnd,
+        WM_APP_FRAME,
+        WM_APP_FRAME,
+        PM_REMOVE,
+    ).as_bool() {
+        collapsed += 1;
+    }
+    collapsed
 }
 
 /// Stop-Nachricht posten (Owner-Drop → Render-Thread beendet sich).
@@ -707,8 +730,13 @@ pub enum ZoomMode {
     Stretch,
 }
 
-/// Fullscreen-Dreieck + Letterbox-Viewport + Draw + Present (SyncInterval 0).
-/// Läuft ausschließlich im Render-Thread.
+/// Fullscreen-Dreieck + Letterbox-Viewport + Draw + Present. Läuft
+/// ausschließlich im Render-Thread.
+///
+/// `sync_interval`: 0 = Present ohne Sync (Default, niedrigste Latenz);
+/// 1 = am Display-Takt (settings/vsync, „Vertical sync") — rückt den
+/// Inhaltswechsel auf Vblank-Grenzen, kostet bis zu ein Refresh-Intervall
+/// Latenz.
 ///
 /// `zoom_factor` (settings/zoom_factor, 0 = aus): bei ZoomMode::Zoom wird
 /// statt der füllenden Skala die **Fit-Skala × Faktor** verwendet
@@ -721,6 +749,7 @@ pub fn draw_and_present(
     video_size: (u32, u32),
     zoom: ZoomMode,
     zoom_factor: f32,
+    sync_interval: u32,
 ) -> SysResult<()> {
     let (vw, vh) = (video_size.0.max(1) as f32, video_size.1.max(1) as f32);
     let (ww, wh) = (d3d.width.max(1) as f32, d3d.height.max(1) as f32);
@@ -788,7 +817,7 @@ pub fn draw_and_present(
             d3d.context.Draw(3, 0);
             d3d.context.Flush();
         }
-        d3d.swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
+        d3d.swap_chain.Present(sync_interval, DXGI_PRESENT(0)).ok()?;
     }
     Ok(())
 }

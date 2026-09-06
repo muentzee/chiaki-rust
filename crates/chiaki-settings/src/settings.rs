@@ -770,10 +770,22 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// Lesender Vorgriff auf `settings/log_verbose` — für den tracing-
+    /// EnvFilter-Default, der vor dem eigentlichen `Settings::open` (und
+    /// damit vor allen Migrationen) feststeht. Liest nur die INI.
+    pub fn peek_log_verbose(profile: Option<&str>) -> bool {
+        let base = app_paths::base_path().to_path_buf();
+        let path = app_paths::settings_file_in(&base, profile.unwrap_or(""));
+        match read_ini_or_empty(&path) {
+            Ok(store) => store.bool_or("settings/log_verbose", false),
+            Err(_) => false,
+        }
+    }
+
     /// Öffnet die Settings für ein Profil (wie `Settings::Settings(conf)`).
     /// `None`/`""` = Basis-`settings.ini` (dann zeigen `store` und
     /// `default_store` auf dieselbe Datei und werden beim `save()`
-    /// zusammengeführt — wie zwei QSettings-Instanzen auf dieselbe Datei).
+    /// zusammengeführt — wie zwei QSettings-Instanzen auf derselben Datei).
     pub fn open(profile: Option<&str>) -> Result<Settings> {
         let base = app_paths::base_path().to_path_buf();
         let paths = SettingsPaths {

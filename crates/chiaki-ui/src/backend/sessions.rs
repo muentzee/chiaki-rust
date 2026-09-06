@@ -149,6 +149,11 @@ pub struct StreamTelemetry {
     pub rtt_ms_x10: AtomicU32,
     /// Haptics-Modus ("DualSense-Haptics" | "Rumble-Fallback" | "aus").
     pub haptics_mode: Mutex<String>,
+    /// Media-Thread: EMA der Wall-Clock-Zeit je ANGEZEIGTEM Frame (decode
+    /// aller queued Samples + VSR + Interop/Copy/Upload, µs) — Quelle der
+    /// FRAME-TIME-Badge im GPU-Pfad (dort bleibt der Presenter ungenutzt).
+    /// 0 = noch keine Messung.
+    pub media_frame_us: AtomicU32,
 }
 
 impl StreamTelemetry {
@@ -261,6 +266,9 @@ pub(crate) struct MediaSettings {
     pub start_mic_unmuted: bool,
     pub rumble_haptics_intensity: RumbleHapticsIntensity,
     pub haptic_override: f32,
+    /// settings/vsync — GPU-Sink presentet mit SyncInterval 1 (Display-Takt)
+    /// statt 0. Wirksam beim Session-Start (Sink-Erzeugung).
+    pub vsync: bool,
     /// GPU-Pfad (settings/video_output) — `None` = klassischer Presenter-Pfad.
     pub gpu: Option<GpuPath>,
 }
@@ -326,6 +334,7 @@ impl MediaSettings {
             start_mic_unmuted: settings.start_mic_unmuted(),
             rumble_haptics_intensity: settings.rumble_haptics_intensity(),
             haptic_override: settings.haptic_override() as f32,
+            vsync: settings.vsync_enabled(),
             gpu: None, // wird in connect() entschieden (needs Profil-Auflösung)
         }
     }
@@ -886,7 +895,7 @@ impl SessionManager {
                 } else {
                     (w, h)
                 };
-                match chiaki_render::gpu_sink::GpuSink::new(GPUI_WINDOW_TITLE, video_size) {
+                match chiaki_render::gpu_sink::GpuSink::new(GPUI_WINDOW_TITLE, video_size, media.vsync) {
                     Ok(sink) => {
                         let kind = if media.nv_vsr {
                             GpuPathKind::CudaVsrInterop
@@ -1676,6 +1685,13 @@ struct MediaTimings {
         let mut prev_generated: u64 = 0;
         let mut prev_dropped: u64 = 0;
         let mut prev_slot_dropped: u64 = 0;
+        // FRAME-TIME im GPU-Pfad: EMA der Wall-Clock-Zeit je angezeigtem
+        // Frame (gesamter Media-Durchlauf, siehe unten) → Telemetrie → HUD.
+        let mut media_frame_ema_us: u64 = 0;
+        // Audio-Bilanz im Perioden-Log (HANDOFF P1): pushed vs. pulled.
+        let mut prev_audio_pushed: u64 = 0;
+        let mut prev_audio_pulled: u64 = 0;
+        let mut prev_audio_clears: u64 = 0;
 
         // --- Audio (OpusDecoder + Output entstehen mit dem AudioHeader) ---
         let mut opus = OpusAudioDecoder::new();
@@ -1815,6 +1831,10 @@ struct MediaTimings {
                 }
                 let mut latest: Option<Latest> = None;
                 let mut rebuild_decoder_cpu = false;
+                // Wall-Clock je angezeigtem Frame (alle queued Samples +
+                // VSR + Übergabe) — die FRAME-TIME im GPU-Pfad.
+                let pass_t0 = std::time::Instant::now();
+                let frames_before = t.frames;
                 while let Some(sample) = session.shared_video_slot().pop() {
                     let Some(decoder) = decoder.as_mut() else { break };
                     let t0 = std::time::Instant::now();
@@ -2061,6 +2081,18 @@ struct MediaTimings {
                         }
                     }
                 }
+                if t.frames > frames_before {
+                    let pass_us = pass_t0.elapsed().as_micros() as u64;
+                    media_frame_ema_us = if media_frame_ema_us == 0 {
+                        pass_us
+                    } else {
+                        media_frame_ema_us * 9 / 10 + pass_us / 10
+                    };
+                    session
+                        .telemetry
+                        .media_frame_us
+                        .store(media_frame_ema_us.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+                }
                 if t.frames % 300 == 0 {
                     let n = t.frames.max(1) as f64;
                     let snap = session.presenter.stats();
@@ -2068,32 +2100,60 @@ struct MediaTimings {
                     let sink_line = gpu_handle.as_ref().map(|g| {
                         let s = g.stats_values();
                         format!(
-                            " | Sink: presented {}, uploads {}, d3d11-copies {}, rgba {}, drops {}",
+                            " | Sink: presented {}, uploads {}, d3d11-copies {}, rgba {}, drops {}, burst-collapsed {}, too-fast {}, dt-ema {} µs",
                             s.frames_presented,
                             s.cpu_uploads,
                             s.d3d11_copies,
                             s.rgba_presents,
-                            s.frames_dropped
+                            s.frames_dropped,
+                            s.burst_collapsed,
+                            s.present_too_fast,
+                            s.present_dt_ema_us,
+                        )
+                    });
+                    // Audio-Bilanz (HANDOFF P1): pushed vs. pulled je Fenster.
+                    // pushed > pulled dauerhaft = Überproduktion; pulled im
+                    // Rückstand mit Clears = Konsum-Stalls (Gerät/Treiber).
+                    let audio_line = audio_out.as_ref().map(|out| {
+                        let pushed = out.pushed_samples();
+                        let pulled = out.pulled_samples();
+                        let clears = out.clears();
+                        format!(
+                            " | Audio: fill {:.1} ms, push Δ+{}, pull Δ+{} ({} Samples), clears Δ{}, underflows {}, dropped {}",
+                            out.current_buffer_fill_ms(),
+                            pushed.saturating_sub(prev_audio_pushed),
+                            pulled.saturating_sub(prev_audio_pulled),
+                            pulled.saturating_sub(prev_audio_pulled) / 2,
+                            clears.saturating_sub(prev_audio_clears),
+                            out.underflows(),
+                            out.dropped_samples(),
                         )
                     });
                     tracing::info!(
-                        "Media-Pipeline (Ø über {} Frames, {} Samples): decode {:.2} ms, nv12-copy {:.2} ms, vsr {:.2} ms, out-take {:.2} ms — Summe {:.2} ms/Frame (Budget 16,7) | Presenter Δ: gen {}, präsentiert {}, UI-Drops {}, Slot-Drops {}{}",
+                        "Media-Pipeline (Ø über {} Frames, {} Samples): decode {:.2} ms, nv12-copy {:.2} ms, vsr {:.2} ms, out-take {:.2} ms — Summe {:.2} ms/Frame (Budget 16,7), pass-ema {:.2} ms | Presenter Δ: gen {}, präsentiert {}, UI-Drops {}, Slot-Drops {}{}{}",
                         t.frames, t.samples,
                         t.decode_us as f64 / n / 1000.0,
                         t.nv12_copy_us as f64 / n / 1000.0,
                         t.vsr_us as f64 / n / 1000.0,
                         t.out_copy_us as f64 / n / 1000.0,
                         (t.decode_us + t.nv12_copy_us + t.vsr_us + t.out_copy_us) as f64 / n / 1000.0,
+                        media_frame_ema_us as f64 / 1000.0,
                         snap.frames_generated.saturating_sub(prev_generated),
                         snap.frames_presented.saturating_sub(prev_presented),
                         snap.frames_dropped.saturating_sub(prev_dropped),
                         slot_dropped.saturating_sub(prev_slot_dropped),
                         sink_line.unwrap_or_default(),
+                        audio_line.unwrap_or_default(),
                     );
                     prev_presented = snap.frames_presented;
                     prev_generated = snap.frames_generated;
                     prev_dropped = snap.frames_dropped;
                     prev_slot_dropped = slot_dropped;
+                    if let Some(out) = audio_out.as_ref() {
+                        prev_audio_pushed = out.pushed_samples();
+                        prev_audio_pulled = out.pulled_samples();
+                        prev_audio_clears = out.clears();
+                    }
                 }
             }
         }

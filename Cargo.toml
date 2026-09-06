@@ -7,6 +7,7 @@ members = [
     "crates/chiaki-render",
     "crates/chiaki-input",
     "crates/chiaki-settings",
+    "crates/chiaki-steam",
     "crates/chiaki-ui",
     "crates/chiaki-app",
     "crates/chiaki-cli",
@@ -25,6 +26,7 @@ chiaki-media = { path = "crates/chiaki-media" }
 chiaki-render = { path = "crates/chiaki-render" }
 chiaki-input = { path = "crates/chiaki-input" }
 chiaki-settings = { path = "crates/chiaki-settings" }
+chiaki-steam = { path = "crates/chiaki-steam" }
 chiaki-ui = { path = "crates/chiaki-ui" }
 thiserror = "2"
 tracing = "0.1"

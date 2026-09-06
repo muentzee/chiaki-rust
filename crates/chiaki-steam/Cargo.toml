@@ -1,0 +1,15 @@
+[package]
+name = "chiaki-steam"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tracing.workspace = true
+thiserror.workspace = true
+
+# Windows-Registry-Zugriff für die Steam-Installationssuche (HKCU\Software\Valve\Steam\SteamPath).
+# Entscheidung: winreg statt windows-crate — deutlich einfachere API und kein
+# unsafe nötig (CONVENTIONS.md: kein unsafe, außer wo unvermeidbar).
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"

@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# lib+bin: die Steam-Shortcut-Verwaltung (src/steam.rs) liegt in der Library,
-# das Binary (src/main.rs) bleibt unberührt und kann sie später importieren.
+# lib+bin: das Binary (src/main.rs) braucht die Library für das
+# chiaki-ui::run-Glue; chiaki-steam (Steam-Shortcuts) ist eigener Crate.
 [lib]
 name = "chiaki_app"
 path = "src/lib.rs"
@@ -21,17 +21,12 @@ chiaki-media.workspace = true
 chiaki-render.workspace = true
 chiaki-input.workspace = true
 chiaki-settings.workspace = true
+chiaki-steam.workspace = true
 chiaki-ui.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
 
-# Windows-Registry-Zugriff für die Steam-Installationssuche (HKCU\Software\Valve\Steam\SteamPath).
-# Entscheidung: winreg statt windows-crate (windows.workspace = true + Feature
-# "Win32_System_Registry") — deutlich einfachere API und kein unsafe nötig
-# (CONVENTIONS.md: kein unsafe, außer wo unvermeidbar).
-[target.'cfg(windows)'.dependencies]
-winreg = "0.52"
 # Prozess-Initialisierung des Binaries: HIGH_PRIORITY_CLASS wie gui/src/main.cpp
 # (SetPriorityClass, Win32_System_Threading — Features kommen aus der
 # Workspace-Dep, dort nur Ergänzungen, keine Entfernung).

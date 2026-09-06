@@ -275,6 +275,11 @@ pub struct StreamSnapshot {
     pub zoom: ZoomMode,
     pub zoom_factor: f32,
     pub mic_unmuted: bool,
+    /// settings/fullscreen_doubleclick: Doppelklick in die Video-Fläche
+    /// toggelt Vollbild (Stream-Seite, click_count ≥ 2).
+    pub doubleclick_fullscreen: bool,
+    /// settings/hide_cursor: Mauszeiger über der Video-Fläche verstecken.
+    pub hide_cursor: bool,
     pub stats: HudStats,
     pub vsr_active: bool,
     pub vsr_scale: u32,
@@ -518,11 +523,12 @@ impl StreamUiState {
         // komplette GPU-Anzeigepfad ist so ohne Konsole testbar.
         let mut gpu_handle: Option<GpuSinkHandle> = None;
         {
-            let settings = self.backend.settings().lock().unwrap_or_else(|e| e.into_inner());
-            let want = settings.video_output();
-            drop(settings);
+            let (want, vsync) = {
+                let settings = self.backend.settings().lock().unwrap_or_else(|e| e.into_inner());
+                (settings.video_output(), settings.vsync_enabled())
+            };
             if want != "cpu" {
-                match GpuSink::new(GPUI_WINDOW_TITLE, (fake::WIDTH, fake::HEIGHT)) {
+                match GpuSink::new(GPUI_WINDOW_TITLE, (fake::WIDTH, fake::HEIGHT), vsync) {
                     Ok(sink) => {
                         let h = sink.handle();
                         tracing::info!("FAKE-Stream: GPU-Sink aktiv (Upload-Pfad, {}x{})", fake::WIDTH, fake::HEIGHT);
@@ -1190,13 +1196,41 @@ impl StreamUiState {
             } else {
                 self.fps_ema * 0.9 + inst_fps * 0.1
             };
-            // Frame-Zeit = Presenter-Overhead (Alloc + NV12→BGRA + Wrap).
+            // Frame-Zeit (CPU-Pfad) = Presenter-Overhead (Alloc + NV12→BGRA +
+            // Wrap). Im GPU-Pfad bleibt der Presenter ungenutzt (alle Werte
+            // 0) — dort zählt die Media-Thread-EMA (siehe unten).
             self.stats.frame_time_ms = (stats.alloc_us.mean_us
                 + stats.conversion_us.mean_us
                 + stats.wrap_us.mean_us) as f32
                 / 1000.0;
         }
-        self.stats.fps = self.fps_ema;
+        // Sink-FPS (GPU-Pfad: presentet der D3D11-Sink, der Presenter bleibt
+        // bei 0 — dieselbe EMA-Mathematik wie die Presenter-FPS oben). Wird
+        // IMMER gepflegt (Badge + Debug-Zeile), nicht nur bei aktivem Debug.
+        let sink_presented_total = self.gpu.as_ref().map(|g| g.stats_values()).map(|s| s.frames_presented).unwrap_or(0);
+        if let Some(gpu) = &self.gpu {
+            let presented = gpu.stats_values().frames_presented;
+            let inst = (presented.saturating_sub(self.last_sink_presented) as f32) / dt;
+            self.last_sink_presented = presented;
+            self.sink_fps_ema = if self.sink_fps_ema == 0.0 {
+                inst
+            } else {
+                self.sink_fps_ema * 0.9 + inst * 0.1
+            };
+        }
+        // FPS/Frame-Time je Pfad: GPU-Pfad (Sink präsentiert) → Sink-FPS +
+        // Media-Thread-EMA; CPU-Pfad → Presenter-FPS + Presenter-Overhead.
+        if sink_presented_total > 0 {
+            self.stats.fps = self.sink_fps_ema;
+            self.stats.frame_time_ms = self
+                .telemetry
+                .as_ref()
+                .map(|t| t.media_frame_us.load(Ordering::Relaxed))
+                .unwrap_or(0) as f32
+                / 1000.0;
+        } else {
+            self.stats.fps = self.fps_ema;
+        }
         self.stats.bitrate_mbit = self.bitrate_ema;
         self.stats.loss_pct = if frames > 0 {
             Some(lost as f32 * 100.0 / frames as f32)
@@ -1273,18 +1307,8 @@ impl StreamUiState {
             settings.overlay_debug()
         };
         if want_debug {
-            // Sink-FPS (GPU-Pfad: presentet der Sink, der Presenter bleibt
-            // bei 0 — dieselbe EMA-Mathematik wie die Presenter-FPS oben).
-            if let Some(gpu) = &self.gpu {
-                let presented = gpu.stats_values().frames_presented;
-                let inst = (presented.saturating_sub(self.last_sink_presented) as f32) / dt;
-                self.last_sink_presented = presented;
-                self.sink_fps_ema = if self.sink_fps_ema == 0.0 {
-                    inst
-                } else {
-                    self.sink_fps_ema * 0.9 + inst * 0.1
-                };
-            }
+            // Sink-FPS-EMA wird oben IMMER gepflegt (Badge braucht sie im
+            // GPU-Pfad) — hier nur die Zeile bauen.
             self.debug_line = Some(self.build_debug_line());
         } else {
             self.debug_line = None;
@@ -1354,14 +1378,21 @@ impl StreamUiState {
             _ => "—".to_string(),
         };
         let gen = presenter.as_ref().map(|p| p.frames_generated).unwrap_or(0);
-        let (uploads, sink_drops) = match &sink {
-            Some(s) => ((s.cpu_uploads + s.d3d11_copies).to_string(), s.frames_dropped.to_string()),
-            None => ("—".to_string(), "—".to_string()),
+        let (uploads, sink_drops, collapsed, too_fast, dt_ema) = match &sink {
+            Some(s) => (
+                (s.cpu_uploads + s.d3d11_copies).to_string(),
+                s.frames_dropped.to_string(),
+                s.burst_collapsed.to_string(),
+                s.present_too_fast.to_string(),
+                format!("{} µs", s.present_dt_ema_us),
+            ),
+            None => ("—".to_string(), "—".to_string(), "—".to_string(), "—".to_string(), "—".to_string()),
         };
 
         format!(
             "presented {fps:.1} fps (drops {drops}) | media {media_ms:.1} ms (dec {dec} / vsr {vsr}) \
-             | slot-drops {slot_drops} | conv {conv} | sink {gen}/{uploads}/{sink_drops}",
+             | slot-drops {slot_drops} | conv {conv} | sink {gen}/{uploads}/{sink_drops} \
+             | burst {collapsed}, too-fast {too_fast}, dt {dt_ema}",
         )
     }
 
@@ -1379,7 +1410,7 @@ impl StreamUiState {
             ),
             None => (false, 0),
         };
-        let (vsr_badge_wanted, overlay) = {
+        let (vsr_badge_wanted, overlay, doubleclick_fullscreen, hide_cursor) = {
             let settings = self
                 .backend
                 .settings()
@@ -1388,6 +1419,8 @@ impl StreamUiState {
             (
                 settings.show_vsr_badge(),
                 super::hud::OverlayConfig::from_settings(&settings),
+                settings.fullscreen_double_click_enabled(),
+                settings.hide_cursor(),
             )
         };
         StreamSnapshot {
@@ -1407,6 +1440,8 @@ impl StreamUiState {
             zoom: self.zoom,
             zoom_factor: self.zoom_factor,
             mic_unmuted: self.mic_unmuted,
+            doubleclick_fullscreen,
+            hide_cursor,
             stats: self.stats.clone(),
             vsr_active,
             vsr_scale,

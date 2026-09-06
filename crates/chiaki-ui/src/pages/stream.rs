@@ -138,9 +138,11 @@ pub fn page(
             cx.global_mut::<StreamUiState>().cycle_zoom();
         }
     });
-    let on_video_click = cx.listener(|_shell, ev: &gpui::ClickEvent, window, _cx| {
-        // Doppelklick = Vollbild-Toggle (wie F11, C++-Verhalten).
-        if ev.click_count() >= 2 {
+    // settings/fullscreen_doubleclick: Doppelklick-Toggle nur wenn der
+    // Schalter an ist (F11 wirkt unabhängig davon).
+    let doubleclick_fullscreen = snap.doubleclick_fullscreen;
+    let on_video_click = cx.listener(move |_shell, ev: &gpui::ClickEvent, window, _cx| {
+        if doubleclick_fullscreen && ev.click_count() >= 2 {
             window.toggle_fullscreen();
         }
     });
@@ -193,6 +195,11 @@ pub fn page(
         .absolute()
         .inset_0()
         .on_click(on_video_click);
+    // settings/hide_cursor: solange gestreamt wird, versteckt der Stream den
+    // Mauszeiger über der Video-Fläche (gpui setzt den Style beim Hover).
+    if snap.stage == Stage::Streaming && snap.hide_cursor {
+        video_area = video_area.cursor(gpui::CursorStyle::None);
+    }
     if gpu_mode {
         video_area = video_area.child(div());
     } else {

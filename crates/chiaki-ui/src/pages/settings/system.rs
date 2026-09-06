@@ -176,17 +176,29 @@ pub(crate) fn sections(
         true,
         sanitize,
     ), "Log-Sanitizer ist nicht implementiert"));
-    logging.push(inactive(toggle_row(
+    // log_verbose: wird beim nächsten App-Start als tracing-EnvFilter-Default
+    // gelesen (debug statt info); RUST_LOG überschreibt weiterhin.
+    logging.push(toggle_row(
         "system-log-verbose",
         "Verbose logging",
-        Some("Debug-level logs \u{2014} only for diagnostics, grows quickly"),
+        Some(
+            "Debug-level logs \u{2014} only for diagnostics, grows quickly. \
+             Wirksam nach App-Neustart (RUST_LOG überschreibt weiterhin)",
+        ),
         "verbose debug logs",
         true,
         verbose,
-    ), "Log-Level kommt aus der Umgebung (RUST_LOG), nicht aus diesem Key"));
+    ));
 
     let mut steam = Section::new("Steam");
-    steam.push(inactive(action_row(
+    // Add to Steam library: chiaki-steam ist eigener Crate (kein Dep-Zyklus
+    // mehr über chiaki-app) — der Port von QmlBackend::createSteamShortcut:
+    // Exe = laufendes chiaki.exe, StartDir = Exe-Verzeichnis, Launch-Options
+    // mit dem aktuellen Profil, Controller-Layout-Workshop-ID wird gesetzt.
+    // Grid-Artwork bleibt bewusst leer (das C++ nutzte eingebettete Qt-
+    // Ressourcen; Steam zeigt dann sein Standard-Bild).
+    let profile_for_steam = current.clone();
+    steam.push(action_row(
         "system-steam-shortcut",
         "Add to Steam library",
         Some("Creates a Steam shortcut that launches chiaki with this profile"),
@@ -194,20 +206,51 @@ pub(crate) fn sections(
         true,
         "Create\u{2026}",
         false,
-        |_shell, cx| {
-            // chiaki_app::steam::SteamShortcuts::add_to_library kann hier
-            // nicht benutzt werden: chiaki-app hängt von chiaki-ui ab
-            // (Binary) — eine Rück-Dependenz wäre ein Cargo-Zyklus. Der
-            // Flow gehört daher ins chiaki-app-Binary (TODO(app-agent)).
-            super::push_toast(
-                cx,
-                crate::components::ToastKind::Info,
-                "Add to Steam library",
-                "Der Steam-Shortcut-Flow (chiaki_app::steam) wird vom \
-                 chiaki-app-Binary verdrahtet (Dep-Zyklus chiaki-app → chiaki-ui).",
-            );
+        move |shell, cx| {
+            let launch_options = if profile_for_steam.is_empty() {
+                String::new()
+            } else {
+                format!("--profile {}", profile_for_steam)
+            };
+            let result = chiaki_steam::SteamShortcuts::open(None).and_then(|steam| {
+                let artwork = chiaki_steam::Artwork {
+                    icon: None,
+                    landscape: None,
+                    portrait: None,
+                    hero: None,
+                    logo: None,
+                };
+                steam.add_to_library("Chiaki Remaster", &launch_options, &artwork)
+            });
+            match result {
+                Ok(action) => {
+                    let text = match action {
+                        chiaki_steam::SteamShortcutAction::Added => "Shortcut erstellt",
+                        chiaki_steam::SteamShortcutAction::Updated => "Shortcut aktualisiert",
+                    };
+                    shell.push_toast(
+                        crate::components::ToastData::new(
+                            crate::components::ToastKind::Success,
+                            "Add to Steam library",
+                        )
+                        .message(format!("{text} — Steam neu starten, damit er erscheint")),
+                        cx,
+                    );
+                }
+                Err(err) => {
+                    tracing::error!("Steam-Shortcut fehlgeschlagen: {err}");
+                    shell.push_toast(
+                        crate::components::ToastData::new(
+                            crate::components::ToastKind::Danger,
+                            "Add to Steam library",
+                        )
+                        .message(err.to_string()),
+                        cx,
+                    );
+                }
+            }
         },
-    ), "Flow wird vom chiaki-app-Binary verdrahtet (Dep-Zyklus)"));
+    ));
 
     let mut data = Section::new("Data");
     data.push(action_row(

@@ -1027,12 +1027,12 @@ dependencies = [
  "chiaki-remote",
  "chiaki-render",
  "chiaki-settings",
+ "chiaki-steam",
  "chiaki-ui",
  "thiserror 2.0.20",
  "tracing",
  "tracing-subscriber",
  "windows 0.58.0",
- "winreg 0.52.0",
 ]
 
 [[package]]
@@ -1158,6 +1158,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "chiaki-steam"
+version = "1.10.0"
+dependencies = [
+ "thiserror 2.0.20",
+ "tracing",
+ "winreg 0.52.0",
+]
+
+[[package]]
 name = "chiaki-ui"
 version = "1.10.0"
 dependencies = [
@@ -1167,6 +1176,7 @@ dependencies = [
  "chiaki-remote",
  "chiaki-render",
  "chiaki-settings",
+ "chiaki-steam",
  "gpui",
  "thiserror 2.0.20",
  "tracing",

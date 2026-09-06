@@ -89,14 +89,21 @@ fn run(
         }
 
         // Testpattern erzeugen und in den Presenter legen (Producer-Rolle
-        // des echten Media-Threads).
+        // des echten Media-Threads). Die Frame-Erzeugungszeit dient als
+        // FRAME-TIME (telemetry.media_frame_us), wenn der GPU-Pfad den
+        // Presenter ungenutzt lässt.
         let t = (frame_index % (60 * 8)) as f32 / 60.0; // 8-s-Zyklus
+        let frame_t0 = Instant::now();
         let frame = test_pattern(t, frame_index);
         // GPU-Sink vorhanden (settings/video_output) → Upload-Pfad testen.
         match &gpu {
             Some(g) if !g.is_lost() => g.submit_cpu(frame),
             _ => presenter.set_frame(frame),
         };
+        let frame_us = frame_t0.elapsed().as_micros() as u64;
+        let prev = telemetry.media_frame_us.load(Ordering::Relaxed) as u64;
+        let ema = if prev == 0 { frame_us } else { prev * 9 / 10 + frame_us / 10 };
+        telemetry.media_frame_us.store(ema.min(u32::MAX as u64) as u32, Ordering::Relaxed);
 
         // Telemetrie: gemessene Bitrate (bytes/s → Bytes pro Frame), Frames,
         // gelegentlich ein verlorener Frame, Audio-Füllstand, RTT, Decoder.

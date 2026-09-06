@@ -55,10 +55,16 @@ pub const SDL_MIX_MAXVOLUME: u32 = 128;
 /// Atomics, damit sie ohne Lock lesbar sind.
 struct SampleRing {
     state: Mutex<RingState>,
+    /// In den Ring geschobene Samples (Producer-Gesamtmenge, Messung P1).
+    pushed: AtomicU64,
+    /// Vom Callback entnommene Samples (Konsument-Gesamtmenge, Messung P1).
+    pulled: AtomicU64,
     /// Samples, die durch Überlauf/Latenz-Clear verworfen wurden (Stats-HUD).
     dropped: AtomicU64,
     /// Callbacks, bei denen der Ring leer war und Stille gespielt wurde.
     underflows: AtomicU64,
+    /// Ausgelöste 3×-Latenz-Clears ("queue exceeded latency threshold").
+    clears: AtomicU64,
 }
 
 struct RingState {
@@ -79,8 +85,11 @@ impl SampleRing {
                 fill: 0,
                 overflow_warned: false,
             }),
+            pushed: AtomicU64::new(0),
+            pulled: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             underflows: AtomicU64::new(0),
+            clears: AtomicU64::new(0),
         }
     }
 
@@ -104,6 +113,7 @@ impl SampleRing {
         if data.is_empty() {
             return;
         }
+        self.pushed.fetch_add(data.len() as u64, Ordering::Relaxed);
         let Ok(mut state) = self.state.lock() else {
             return; // vergifteter Lock: Audio wegwerfen, nicht blockieren
         };
@@ -122,6 +132,7 @@ impl SampleRing {
             state.write = 0;
             state.fill = 0;
             state.overflow_warned = false;
+            self.clears.fetch_add(1, Ordering::Relaxed);
             tracing::warn!("Audio queue exceeded latency threshold, clearing queued audio");
         }
 
@@ -184,6 +195,7 @@ impl SampleRing {
             // Underflow → der Rest von `out` bleibt Stille (SDL-Verhalten).
             self.underflows.fetch_add(1, Ordering::Relaxed);
         }
+        self.pulled.fetch_add(done as u64, Ordering::Relaxed);
         done
     }
 
@@ -285,7 +297,10 @@ impl AudioOutput {
             pick_stream_config(&device, Direction::Output, sample_rate, channels, requested_frames)?;
 
         let shared = Arc::new(OutShared {
-            ring: SampleRing::new(buffer_samples * 4), // C++: ring_buf.resize(audio_buffer_size * 8) Bytes
+            // C++: ring_buf.resize(audio_buffer_size * 8) ist in BYTES — bei
+            // S16 also 38400 Samples (nicht buffer_samples × 4: das wäre nur
+            // die halbe C++-Kapazität).
+            ring: SampleRing::new(buffer_samples * 8),
             volume128: AtomicU32::new(SDL_MIX_MAXVOLUME),
             clear_threshold: (buffer_samples * 3) as u64, // C++: SDL_GetQueuedAudioSize > 3 * audio_buffer_size
             sample_rate,
@@ -398,6 +413,22 @@ impl AudioOutput {
     /// Durch Überlauf verworfene Samples (kumulativ).
     pub fn dropped_samples(&self) -> u64 {
         self.shared.ring.dropped.load(Ordering::Relaxed)
+    }
+
+    /// In den Ring geschobene Samples (kumulativ) — Messung Producer-/Konsum-
+    /// Bilanz (HANDOFF P1 "Audio queue exceeded").
+    pub fn pushed_samples(&self) -> u64 {
+        self.shared.ring.pushed.load(Ordering::Relaxed)
+    }
+
+    /// Vom Gerät-Callback entnommene Samples (kumulativ).
+    pub fn pulled_samples(&self) -> u64 {
+        self.shared.ring.pulled.load(Ordering::Relaxed)
+    }
+
+    /// Ausgelöste 3×-Latenz-Clears (kumulativ).
+    pub fn clears(&self) -> u64 {
+        self.shared.ring.clears.load(Ordering::Relaxed)
     }
 
     /// Callbacks, in denen Stille wegen leerem Ring nachgespielt wurde.

@@ -1,14 +1,16 @@
 //! chiaki-app — Bibliotheksanteil des Binaries (Glue/Lifecycle).
 //!
-//! Enthält aktuell die Steam-Library-Shortcut-Verwaltung ([`steam`]),
-//! einen 1:1-Port von `third-party/cpp-steam-tools` (VDF-Shortcuts-Editor)
-//! plus der Parameter-Logik aus `gui/src/qmlbackend.cpp`
-//! (`QmlBackend::createSteamShortcut`, "Add to Steam library").
+//! Die Steam-Library-Shortcut-Verwaltung lebt im eigenen Crate
+//! [`chiaki_steam`] (1:1-Port von `third-party/cpp-steam-tools` plus der
+//! Parameter-Logik aus `gui/src/qmlbackend.cpp`) und wird hier nur
+//! re-exportiert — chiaki-ui hängt an chiaki-steam, nicht an chiaki-app
+//! (Dep-Zyklus chiaki-app → chiaki-ui).
 
 #![deny(unsafe_code)]
 
 pub mod cli;
-pub mod steam;
+
+pub use chiaki_steam as steam;
 
 #[cfg(test)]
 mod portable_zip_tests {

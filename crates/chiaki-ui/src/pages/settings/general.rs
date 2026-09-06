@@ -106,14 +106,17 @@ pub(crate) fn sections(
     // zurückgebaut — der Client verbindet nur noch manuell per Klick. Der
     // INI-Key bleibt als Kompatibilitätsspeicher ohne Funktion (siehe
     // SETTINGS-AUDIT.md).
-    behaviour.push(inactive(toggle_row(
+    // auto_discovery: steuert, ob der Discovery-Service beim App-Start
+    // LAN-Broadcasts sendet (Backend::new liest den Key; Änderung wird beim
+    // nächsten App-Start wirksam).
+    behaviour.push(toggle_row(
         "general-auto-discovery",
         "Auto discovery",
-        Some("Discover consoles on the local network while the app is running"),
+        Some("Discover consoles on the local network while the app is running — wirksam nach App-Neustart"),
         "discovery broadcast network",
         true,
         auto_discovery,
-    ), "Discovery-Service läuft immer — der Filter greift nicht"));
+    ));
     behaviour.push(inactive(toggle_row(
         "general-remote-play-ask",
         "Ask before starting Remote Play",

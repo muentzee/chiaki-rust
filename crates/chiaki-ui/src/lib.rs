@@ -39,7 +39,12 @@ pub use app::{AppShell, Route};
 /// (QCommandLineOption "profile" in gui/src/main.cpp): Nicht-leere Namen
 /// laden `profiles/<name>.ini` statt `settings.ini` (Steam-Launch-Options).
 pub fn run(profile: Option<String>) -> gpui::Result<()> {
-    init_tracing();
+    // settings/log_verbose wird VOR dem tracing-Init gelesen (Peek, ohne
+    // Migration): EnvFilter-Default debug statt info, wenn der Schalter an
+    // ist. RUST_LOG überschreibt weiterhin alles.
+    init_tracing(chiaki_settings::settings::Settings::peek_log_verbose(
+        profile.as_deref(),
+    ));
     install_panic_hook();
 
     let settings = Arc::new(Mutex::new(
@@ -183,11 +188,15 @@ fn install_panic_hook() {
 // Logging: Datei (log_dir) + Konsole, Level via RUST_LOG (Default: info)
 // ---------------------------------------------------------------------------
 
-/// tracing-Subscriber: fmt-Layer auf Logdatei + stdout. Fehler werden
-/// ignoriert (App läuft auch ohne Logdatei).
-fn init_tracing() {
+/// tracing-Subscriber: fmt-Layer auf Logdatei + stdout. `verbose` = der
+/// settings/log_verbose-Schalter (Default-Level debug statt info); RUST_LOG
+/// überschreibt weiterhin alles. Fehler werden ignoriert (App läuft auch
+/// ohne Logdatei).
+fn init_tracing(verbose: bool) {
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
+
+    let default_filter = if verbose { "debug" } else { "info" };
 
     let file_layer = std::fs::create_dir_all(chiaki_settings::app_paths::log_dir())
         .ok()
@@ -209,7 +218,7 @@ fn init_tracing() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
         )
         .with(file_layer)
         .with(console_layer)

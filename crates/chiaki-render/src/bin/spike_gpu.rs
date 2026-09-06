@@ -311,7 +311,7 @@ fn pace_60fps(next: &mut Instant) {
 
 fn phase_cpu_upload(seconds: u64, shared: &Arc<OverlayShared>) -> PhaseOutcome {
     *shared.phase.lock().unwrap() = "cpu-upload (1080p Testpattern)".into();
-    let sink = match GpuSink::new(OVERLAY_TITLE, (1920, 1080)) {
+    let sink = match GpuSink::new(OVERLAY_TITLE, (1920, 1080), false) {
         Ok(s) => s,
         Err(err) => {
             return PhaseOutcome {
@@ -452,7 +452,7 @@ fn decode_loop(
 
 fn phase_d3d11va(seconds: u64, shared: &Arc<OverlayShared>) -> PhaseOutcome {
     *shared.phase.lock().unwrap() = "d3d11va (GPU-GPU Copy)".into();
-    let Ok(sink) = GpuSink::new(OVERLAY_TITLE, (1920, 1080)) else {
+    let Ok(sink) = GpuSink::new(OVERLAY_TITLE, (1920, 1080), false) else {
         return PhaseOutcome {
             name: "d3d11va",
             wall_secs: 0.0,
@@ -566,7 +566,7 @@ fn phase_cuda_vsr(seconds: u64, shared: &Arc<OverlayShared>) -> PhaseOutcome {
                 eprintln!("[phase3] sink creation start");
                 let Some(up) = vsr.as_ref() else { return false };
                 let (out_w, out_h) = up.output_size();
-                match GpuSink::new(OVERLAY_TITLE, (out_w, out_h)) {
+                match GpuSink::new(OVERLAY_TITLE, (out_w, out_h), false) {
                     Ok(s) => {
                         let h = s.handle();
                         h.set_zoom(SinkZoom::Fit);

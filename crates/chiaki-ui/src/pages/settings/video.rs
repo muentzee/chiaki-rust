@@ -18,7 +18,7 @@ use crate::app::AppShell;
 use crate::components::SelectOption;
 
 use super::{
-    inactive, inactive_with, opts, select_row, slider_row, text_row, toggle_row, Section, SRow,
+    inactive, opts, select_row, slider_row, text_row, toggle_row, Section, SRow,
 };
 
 pub(crate) fn sections(
@@ -117,27 +117,25 @@ pub(crate) fn sections(
             s.set_custom_resolution_height(digits.parse().unwrap_or(0));
         },
     ));
-    window.push(inactive(
-        toggle_row(
-            "video-fullscreen-doubleclick",
-            "Toggle fullscreen on double-click",
-            None,
-            "double click fullscreen",
-            true,
-            s.fullscreen_double_click_enabled(),
-        ),
-        "Doppelklick-Handling im Stream-Fenster nicht portiert",
+    // Doppelklick auf die Video-Fläche → Vollbild-Toggle (Stream-Seite,
+    // ClickEvent.click_count ≥ 2 — wie der C++-Double-Click-Handler).
+    window.push(toggle_row(
+        "video-fullscreen-doubleclick",
+        "Toggle fullscreen on double-click",
+        Some("Doppelklick in den Stream wechselt zwischen Fenster und Vollbild"),
+        "double click fullscreen",
+        true,
+        s.fullscreen_double_click_enabled(),
     ));
-    window.push(inactive(
-        toggle_row(
-            "video-hide-cursor",
-            "Hide cursor during stream",
-            None,
-            "mouse pointer",
-            true,
-            s.hide_cursor(),
-        ),
-        "Cursor-Hiding im Stream-Fenster nicht portiert",
+    // Cursor-Hiding: im Stream wird der Mauszeiger über der Video-Fläche
+    // versteckt (Stream-Seite, CursorStyle::None), solange gestreamt wird.
+    window.push(toggle_row(
+        "video-hide-cursor",
+        "Hide cursor during stream",
+        Some("Versteckt den Mauszeiger über der Video-Fläche während des Streams"),
+        "mouse pointer",
+        true,
+        s.hide_cursor(),
     ));
     // Benutzerdefinierter Zoom (settings/zoom_factor): > 0 startet den Stream
     // im Zoom-Modus mit Fit-Skala × Faktor; linker Anschlag (−1) = Auto/aus.
@@ -220,31 +218,21 @@ pub(crate) fn sections(
         ),
         "Pi-Decoder nicht portiert — es läuft immer FFmpeg",
     ));
-    rendering.push(inactive(
-        toggle_row(
-            "video-use-zero-copy",
-            "Zero-copy presentation",
-            Some("Decoded frames reach the renderer without CPU copies (recommended)"),
-            "latency direct render",
-            true,
-            s.use_zero_copy(),
+    // vsync: steuert das Present-Interval des D3D11-Sink-Fensters (GPU-Pfad,
+    // wirksam beim Session-Start). Aus = Present(0) ohne Sync (niedrigste
+    // Latenz); an = SyncInterval 1 — der Inhaltswechsel rückt auf Vblank-
+    // Grenzen (gleichmäßige Kadenz, +bis 1 Refresh-Intervall Latenz).
+    rendering.push(toggle_row(
+        "video-vsync",
+        "Vertical sync",
+        Some(
+            "An = Bildwechsel am Display-Takt (gleichmäßiger, +etwas Latenz); \
+             aus = niedrigste Latenz. Wirksam beim nächsten Session-Start \
+             (GPU-Videopfad)",
         ),
-        "Zero-Copy-Pfad im Rust-Renderer nicht vorhanden",
-    ));
-    // vsync: gpui presentet immer mit SyncInterval 0 (Present(0, 0),
-    // gpui-0.2.2 directx_renderer.rs) — der Key bleibt für INI-Kompatibilität.
-    rendering.push(inactive_with(
-        toggle_row(
-            "video-vsync",
-            "Vertical sync",
-            Some("Off = lowest latency; may show tearing"),
-            "vsync tearing",
-            true,
-            s.vsync_enabled(),
-        ),
-        "im Rust-Renderer immer aus (Present ohne Sync) \u{2014} Key bleibt für INI-Kompatibilität"
-            .to_string(),
-        "gpui presentet immer mit SyncInterval 0 (Present(0, 0))",
+        "vsync tearing fluent sync interval",
+        true,
+        s.vsync_enabled(),
     ));
     rendering.push(inactive(
         select_row(
@@ -446,7 +434,10 @@ pub(crate) fn sections(
     overlay.push(toggle_row(
         "video-overlay-frametime",
         "Badge: Frame-Time",
-        Some("Presenter-Overhead-Badge (Alloc + NV12→BGRA + Wrap) in der Stats-Reihe"),
+        Some(
+            "Zeit pro angezeigtem Frame — GPU-Pfad: Media-Thread (Decode + VSR + \
+             Übergabe), CPU-Pfad: Presenter-Overhead (Alloc + NV12→BGRA + Wrap)",
+        ),
         "hud overlay badge frame time",
         true,
         s.overlay_frametime(),

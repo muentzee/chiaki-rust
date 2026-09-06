@@ -55,12 +55,24 @@ impl Backend {
         let queue = Arc::new(UiEventQueue::new());
         let sender = queue.sender();
 
-        let discovery = match DiscoveryHandle::start(sender.clone()) {
-            Ok(handle) => handle,
-            Err(err) => {
-                tracing::error!("{err} — Discovery deaktiviert");
-                DiscoveryHandle::disabled()
+        // settings/auto_discovery: Discovery nur starten, wenn der Schalter
+        // an ist (C++ liest den Key beim Backend-Aufbau genauso); Änderungen
+        // werden beim nächsten App-Start wirksam.
+        let discovery_enabled = settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .discovery_enabled();
+        let discovery = if discovery_enabled {
+            match DiscoveryHandle::start(sender.clone()) {
+                Ok(handle) => handle,
+                Err(err) => {
+                    tracing::error!("{err} — Discovery deaktiviert");
+                    DiscoveryHandle::disabled()
+                }
             }
+        } else {
+            tracing::info!("Discovery deaktiviert (settings/auto_discovery aus)");
+            DiscoveryHandle::disabled()
         };
 
         let controllers = ControllerHandle::start(sender.clone(), 50);
