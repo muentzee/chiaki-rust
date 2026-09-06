@@ -15,6 +15,7 @@ mod discover;
 mod regist;
 mod stream;
 mod util;
+mod wake;
 
 use clap::{Parser, Subcommand};
 
@@ -47,6 +48,8 @@ pub enum Command {
     /// Start a streaming session (M1 gate: writes the first 100 decodable
     /// H.264/H.265 units to stream.h264/stream.h265)
     Stream(stream::StreamArgs),
+    /// Wake a console in standby (Discovery wakeup packet)
+    Wake(wake::WakeArgs),
 }
 
 /// tracing_subscriber im chiaki-log-Stil: Timestamp, Level, Target.
@@ -76,6 +79,7 @@ fn main() {
         Command::Discover(args) => discover::run(args.clone()),
         Command::Regist(args) => regist::run(args.clone()),
         Command::Stream(args) => stream::run(args.clone()),
+        Command::Wake(args) => wake::run(args.clone()),
     };
 
     if let Err(e) = result {

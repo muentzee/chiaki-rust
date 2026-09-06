@@ -90,6 +90,10 @@ pub struct StreamArgs {
     /// Frame-Metadaten loggen (benötigt die FFmpeg-DLLs)
     #[arg(long)]
     pub decode_test: bool,
+    /// Konsole vor dem Trennen in den Ruhemodus versetzen (goto_bed über
+    /// Ctrl, wie der Disconnect-Dialog der GUI)
+    #[arg(long)]
+    pub standby_on_exit: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -584,6 +588,17 @@ pub fn run(args: StreamArgs) -> Result<(), String> {
     };
 
     // --- Sauberes Herunterfahren (Ctrl+C-Regel: stop + join) ---
+    if args.standby_on_exit && fatal.is_none() && quit_reason.is_none() {
+        // goto_bed läuft über den laufenden Ctrl-Kanal; kurz warten, damit
+        // die Nachricht raus ist, bevor die Session gestoppt wird.
+        match session.goto_bed() {
+            Ok(()) => {
+                tracing::info!("goto_bed sent, waiting 1 s before disconnect");
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            Err(e) => tracing::warn!("goto_bed failed: {e}"),
+        }
+    }
     session.stop();
     session
         .join()
@@ -701,6 +716,7 @@ mod tests {
                 out_dir: PathBuf::from("."),
                 ps5: false,
                 decode_test: false,
+                standby_on_exit: false,
             })
         };
 
