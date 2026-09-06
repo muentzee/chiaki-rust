@@ -123,7 +123,10 @@ pub struct DecodedFrame {
 /// (REWORK.md: `alignedHeight = (data[1] - data[0]) / linesize[0]`).
 ///
 /// Pure Funktion, damit die Logik ohne Pointer testbar ist. `None` bei
-/// unsinniger Kombination (stride 0, Chroma vor Luma, nicht teilbar).
+/// unsinniger Kombination (stride 0, Chroma vor Luma). Die Division ist
+/// wie im C GANZZAHLIG (floor): echte NVDEC-Surfaces haben zwischen Y und
+/// UV ein Padding, das nicht zeilenbündig sein kann — die überzähligen
+/// Bytes werden (wie im C) nicht gelesen.
 pub fn nv12_aligned_height(
     luma_addr: usize,
     chroma_addr: usize,
@@ -133,9 +136,6 @@ pub fn nv12_aligned_height(
         return None;
     }
     let diff = chroma_addr - luma_addr;
-    if !diff.is_multiple_of(luma_stride) {
-        return None;
-    }
     Some((diff / luma_stride) as u32)
 }
 
@@ -923,7 +923,20 @@ mod tests {
     fn aligned_height_rejects_nonsense() {
         assert_eq!(nv12_aligned_height(100, 200, 0), None); // stride 0
         assert_eq!(nv12_aligned_height(200, 100, 64), None); // UV vor Luma
-        assert_eq!(nv12_aligned_height(0, 1089, 64), None); // nicht teilbar
+    }
+
+    #[test]
+    fn aligned_height_nvdec_padding_floors_like_c() {
+        // Echte NVDEC-Surface (Live-Messung 1080p): UV liegt 32 Bytes hinter
+        // dem zeilenbündigen 1920×1088-Layout (Plane-Ausrichtung). Die alte
+        // strenge Teilbarkeitsprüfung hat daran JEDEN Live-Frame verworfen;
+        // das C rechnet (data[1]-data[0])/linesize GANZZAHLIG.
+        let y = 0x2d720dc3080usize;
+        let uv = 0x2d720fc10a0usize;
+        let diff = uv - y;
+        assert_eq!(diff, 1920 * 1088 + 32); // 32-Byte-Ausrichtung der UV-Plane
+        let aligned = nv12_aligned_height(y, uv, 1920).unwrap();
+        assert_eq!(aligned, 1088); // floor(diff / 1920) — wie im C
     }
 
     // --- SyntheticTiming (Port des adaptiven Durations-Schätzers) -----------

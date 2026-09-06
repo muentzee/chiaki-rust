@@ -110,15 +110,20 @@ impl DiscoveryHandle {
                 ping_ms,
                 ping_initial_ms,
                 send_addr,
-                // Interface-Broadcasts kann der App-Layer ergänzen
-                // (Default: nur Limited Broadcast).
-                broadcast_addrs: Vec::new(),
+                // Port des C++ discoverymanager.cpp: neben 255.255.255.255
+                // alle Subnetz-Broadcasts echter Ethernet/WLAN-Adapter pingen
+                // (Multi-NIC-Systeme — VirtualBox & Co. — erreichen das
+                // Limited Broadcast sonst nicht).
+                broadcast_addrs: lan_broadcast_addrs(),
                 send_host: None,
             },
             cb,
         )?;
 
-        tracing::info!("Discovery Service gestartet (Broadcast 255.255.255.255, {ping_ms} ms Ping)");
+        tracing::info!(
+            "Discovery Service gestartet (Broadcast 255.255.255.255 + {} Interface-Broadcasts, {ping_ms} ms Ping)",
+            lan_broadcast_addrs().len()
+        );
         Ok(Self {
             hosts,
             service: Arc::new(Mutex::new(Some(service))),
@@ -179,3 +184,82 @@ pub(crate) fn wakeup_credential(regist_key: &[u8; 16]) -> Result<u64, DiscoveryE
     u64::from_str_radix(key_str, 16).map_err(|_| invalid())
 }
 
+
+/// Port des C++ discoverymanager.cpp (Windows-Zweig): Subnetz-Broadcast-
+/// Adressen aller echten Ethernet/WLAN-Adapter via `GetAdaptersInfo`
+/// (`ip | !mask`). Virtuelle/sonstige Adapter (VirtualBox, VPN, Loopback)
+/// werden wie im C++ über den Typ gefiltert (Ethernet=6, 802.11=71).
+/// Fehler führen zu einer leeren Liste (Limited Broadcast bleibt aktiv).
+fn lan_broadcast_addrs() -> Vec<SocketAddr> {
+    use windows::Win32::NetworkManagement::IpHelper::{GetAdaptersInfo, IP_ADAPTER_INFO};
+
+    const MIB_IF_TYPE_ETHERNET: u32 = 6;
+    const IF_TYPE_IEEE80211: u32 = 71;
+    const NO_ERROR: u32 = 0;
+
+    let mut out: Vec<SocketAddr> = Vec::new();
+    unsafe {
+        // Größenaufruf → Buffer → tatsächlicher Aufruf (C: MALLOC/OVERFLOW).
+        let mut len: u32 = 0;
+        // Erster Aufruf liefert die nötige Buffergröße; je nach Windows-
+        // Version kommt ERROR_BUFFER_OVERFLOW oder ein anderer Code zurück —
+        // entscheidend ist nur, dass len gesetzt wurde.
+        GetAdaptersInfo(None, &mut len);
+        if len == 0 {
+            tracing::error!("DiscoveryManager: GetAdaptersInfo size query failed");
+            return out;
+        }
+        let mut buf = vec![0u8; len as usize];
+        let adapters = buf.as_mut_ptr() as *mut IP_ADAPTER_INFO;
+        if GetAdaptersInfo(Some(adapters), &mut len) != NO_ERROR {
+            tracing::error!("DiscoveryManager: GetAdaptersInfo failed");
+            return out;
+        }
+
+        let i8_to_str = |arr: &[i8]| -> String {
+            arr.iter()
+                .take_while(|&&b| b != 0)
+                .map(|&b| b as u8)
+                .collect::<Vec<u8>>()
+                .into_iter()
+                .map(|b| b as char)
+                .collect()
+        };
+
+        let mut p = adapters;
+        loop {
+            let adapter: &IP_ADAPTER_INFO = &*p;
+            // C++: nur Ethernet und WLAN.
+            if adapter.Type == IF_TYPE_IEEE80211 || adapter.Type == MIB_IF_TYPE_ETHERNET {
+                let ip_str = i8_to_str(&adapter.IpAddressList.IpAddress.String);
+                let ip_str: &str = &ip_str;
+                let mask_str: String = i8_to_str(&adapter.IpAddressList.IpMask.String);
+                let mask_str: &str = &mask_str;
+                if !ip_str.is_empty() && ip_str != "0.0.0.0" {
+                    if let (Ok(ip), Ok(mask)) = (
+                        ip_str.parse::<std::net::Ipv4Addr>(),
+                        mask_str.parse::<std::net::Ipv4Addr>(),
+                    ) {
+                        // broadcast = ip | !mask (C++-Formel)
+                        let broadcast = std::net::Ipv4Addr::from(
+                            u32::from(ip) | !u32::from(mask),
+                        );
+                        let sock = SocketAddr::new(IpAddr::V4(broadcast), 0);
+                        if !out.contains(&sock) {
+                            tracing::info!(
+                                "DiscoveryManager: Interface-Broadcast {broadcast} ({ip_str})"
+                            );
+                            out.push(sock);
+                        }
+                    }
+                }
+            }
+            let next = adapter.Next;
+            if next.is_null() {
+                break;
+            }
+            p = next;
+        }
+    }
+    out
+}

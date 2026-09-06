@@ -829,7 +829,70 @@ impl VsrUpscaler {
             }
             return false;
         }
+        self.process_planes(
+            frame.planes[0].as_mut_ptr().cast(),
+            frame.planes[0].stride,
+            frame.planes[1].as_mut_ptr().cast(),
+            frame.planes[1].stride,
+            frame.pts,
+            frame.duration,
+            frame.frames_lost,
+            frame.recovered,
+            out,
+        )
+    }
 
+    /// VSR aus einem KOPIERTEN NV12-Frame (besessene Planes, z. B. der
+    /// Media-Thread hält nur den neuesten Frame als NV12Frame). Layout:
+    /// `y = data[0..y_stride*h]`, `uv = data[y_stride*h ..]`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_frame_nv12(
+        &mut self,
+        y: &[u8],
+        uv: &[u8],
+        y_stride: usize,
+        uv_stride: usize,
+        width: u32,
+        height: u32,
+        pts: f64,
+        duration: f64,
+        frames_lost: i32,
+        recovered: bool,
+        out: &mut FrameBuf,
+    ) -> bool {
+        if !self.active || self.disabled {
+            return false;
+        }
+        if (width, height) != self.in_size {
+            if self.fail_count == 0 {
+                tracing::error!(
+                    "VSR: frame size {}x{} != init size {}x{}, passing frame through",
+                    width,
+                    height,
+                    self.in_size.0,
+                    self.in_size.1
+                );
+            }
+            return false;
+        }
+        let y_ptr = y.as_ptr() as *mut u8;
+        let uv_ptr = uv.as_ptr() as *mut u8;
+        self.process_planes(y_ptr, y_stride, uv_ptr, uv_stride, pts, duration, frames_lost, recovered, out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn process_planes(
+        &mut self,
+        y_ptr: *mut u8,
+        y_stride: usize,
+        uv_ptr: *mut u8,
+        uv_stride: usize,
+        pts: f64,
+        duration: f64,
+        frames_lost: i32,
+        recovered: bool,
+        out: &mut FrameBuf,
+    ) -> bool {
         let api = self.api.expect("active implies api");
         let effect = self.effect.expect("active implies effect");
         let (in_w, in_h) = self.in_size;
@@ -857,8 +920,8 @@ impl VsrUpscaler {
                     &mut src_y,
                     in_w,
                     in_h,
-                    frame.planes[0].stride as c_int,
-                    frame.planes[0].as_mut_ptr().cast(),
+                    y_stride as c_int,
+                    y_ptr.cast(),
                     NVCV_Y,
                     NVCV_U8,
                     NVCV_INTERLEAVED,
@@ -868,8 +931,8 @@ impl VsrUpscaler {
                     &mut src_uv,
                     in_w,
                     in_h / 2,
-                    frame.planes[1].stride as c_int,
-                    frame.planes[1].as_mut_ptr().cast(),
+                    uv_stride as c_int,
+                    uv_ptr.cast(),
                     NVCV_Y,
                     NVCV_U8,
                     NVCV_INTERLEAVED,
@@ -1090,10 +1153,10 @@ impl VsrUpscaler {
         self.fail_count = 0;
 
         // Metadaten übernehmen (Äquivalent zu av_frame_copy_props).
-        out.pts = frame.pts;
-        out.duration = frame.duration;
-        out.frames_lost = frame.frames_lost;
-        out.recovered = frame.recovered;
+        out.pts = pts;
+        out.duration = duration;
+        out.frames_lost = frames_lost;
+        out.recovered = recovered;
         true
     }
 

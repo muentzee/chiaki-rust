@@ -22,7 +22,7 @@ use gpui::{
 use chiaki_settings::hosts::{HostMac, ManualHost, RegisteredHost};
 
 use crate::app::{AppShell, Route};
-use crate::backend::{ConnectRequest, HostId, LinkQuality};
+use crate::backend::HostId;
 use crate::components::{
     Button, ButtonVariant, Card, Dialog, DialogButton, EmptyState, SectionLabel, StatusBadge,
     StatusKind, ToastData, ToastKind,
@@ -305,7 +305,7 @@ pub(crate) fn connect_entry(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut
         }
         return;
     }
-    let Some(registered) = entry.registered.as_ref() else {
+    if entry.registered.is_none() {
         shell.push_toast(
             toast(
                 ToastKind::Warn,
@@ -315,7 +315,7 @@ pub(crate) fn connect_entry(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut
             cx,
         );
         return;
-    };
+    }
     if entry.addr.is_empty() {
         shell.push_toast(
             toast(ToastKind::Warn, "Keine Adresse", "Für diese Konsole ist keine IP bekannt."),
@@ -329,23 +329,27 @@ pub(crate) fn connect_entry(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut
         wake_entry(shell, entry, cx);
         return;
     }
-    let request = match entry.manual.as_ref() {
-        Some(manual) => ConnectRequest::from_manual(manual, registered, LinkQuality::Local),
-        None => ConnectRequest::from_registered(registered, entry.addr.clone(), LinkQuality::Local),
-    };
-    let host_id = request.host_id.clone();
-    match shell.backend.sessions().connect(request) {
-        Ok(_) => {
+    // NUR navigieren — den Session-Start besitzt die Stream-Ansicht allein
+    // (resolve_request + connect_started-Guard). Ein connect() hier würde
+    // (a) den UI-Thread blockieren und (b) einen ZWEITEN Start neben dem der
+    // Stream-Ansicht erzeugen (zwei Sessions konkurrieren um die Konsole).
+    let host_id = match (entry.registered.as_ref(), entry.manual.as_ref(), entry.duid.as_ref()) {
+        (Some(registered), _, _) => HostId::Registered { mac: *registered.server_mac.mac() },
+        (_, Some(manual), _) => HostId::Manual { id: manual.id },
+        (_, _, Some(duid)) => HostId::Psn { duid: duid.clone() },
+        _ => {
             shell.push_toast(
-                toast(ToastKind::Info, "Verbinde …", format!("„{}“ ({})", entry.name, entry.addr)),
+                toast(ToastKind::Warn, "Nicht verbunden", "Konsole ist nicht registriert."),
                 cx,
             );
-            shell.navigate(Route::Stream(host_id), cx);
+            return;
         }
-        Err(err) => {
-            shell.push_toast(toast(ToastKind::Danger, "Verbindung fehlgeschlagen", err.to_string()), cx);
-        }
-    }
+    };
+    shell.push_toast(
+        toast(ToastKind::Info, "Verbinde …", format!("\u{201e}{}\u{201c} ({})", entry.name, entry.addr)),
+        cx,
+    );
+    shell.navigate(Route::Stream(host_id), cx);
 }
 
 /// Kontextmenü einer Kachel (Spec: Aufwachen, Verstecken, Registrierung

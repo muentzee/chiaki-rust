@@ -545,6 +545,19 @@ impl StreamUiState {
             return;
         }
         let active = self.backend.sessions().active();
+        // Presenter + Telemetrie der aktiven Session übernehmen (einmalig):
+        // der Media-Thread pusht Frames in DIESEN Presenter — ohne diese
+        // Verdrahtung zeigt die Seite „Kein Video-Signal“, obwohl dekodiert
+        // wird (der Fake-Pfad setzt seinen Presenter in start_fake()).
+        if self.presenter.is_none() {
+            if let Some(active) = &active {
+                self.presenter = Some(active.presenter.clone());
+                self.telemetry = Some(Arc::clone(&active.telemetry));
+                if self.stage == Stage::Login {
+                    self.login_active_since = None; // Session da → Heuristik stoppen
+                }
+            }
+        }
         match self.stage {
             Stage::Wake => {
                 // Wakeup einmal senden, dann auf Ready warten (Timeout →

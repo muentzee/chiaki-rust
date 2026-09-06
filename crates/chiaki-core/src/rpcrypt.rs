@@ -232,6 +232,11 @@ pub fn ambassador_from_aeropause(
 }
 
 /// ChiakiRPCrypt (chiaki_rpcrypt_t).
+///
+/// Clone: das C teilt denselben `chiaki_rpcrypt_t`-Zeiger zwischen Session,
+/// Ctrl und StreamConnection; in Rust klonen sich alle Beteiligten denselben
+/// Zustand (nur unveränderliche Keys + Target).
+#[derive(Clone)]
 pub struct Rpcrypt {
     pub target: Target,
     /// AES-128 key ("bright").

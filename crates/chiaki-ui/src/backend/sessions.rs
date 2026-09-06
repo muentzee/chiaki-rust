@@ -56,6 +56,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+use std::collections::VecDeque;
 
 use chiaki_core::audio::AudioHeader;
 use chiaki_core::controller::ControllerState;
@@ -171,11 +172,18 @@ pub(crate) enum MediaCmd {
     MicUnmuted(bool),
 }
 
-/// 1-Slot-Queue für den neuesten Annexb-Frame (Drop-Oldest — "immer nur der
-/// letzte Frame", wie der Presenter es für dekodierte Frames macht).
+/// Bounded FIFO für empfangene (kodierte) Frames. H.265/H.264 referenziert
+/// zeitlich voraus — jeder Frame MUSS dekodiert werden, sonst reißt das Bild
+/// (P-Frames ohne Referenz). Der C++-Client dekodiert in `video_sample_cb`
+/// ebenfalls jeden Frame; nur die ANZEIGE behält den neuesten.
+/// Kapazität 16 ≈ 266 ms @60fps — der Media-Thread (NVDEC ~2 ms/Frame)
+/// dräniert schneller als gefüllt wird.
 pub(crate) struct VideoSlot {
-    slot: Mutex<Option<VideoSample>>,
+    queue: Mutex<VecDeque<VideoSample>>,
+    dropped: AtomicU64,
 }
+
+const VIDEO_SLOT_CAP: usize = 16;
 
 struct VideoSample {
     data: Vec<u8>,
@@ -185,16 +193,32 @@ struct VideoSample {
 
 impl VideoSlot {
     fn new() -> Self {
-        Self { slot: Mutex::new(None) }
+        Self {
+            queue: Mutex::new(VecDeque::with_capacity(VIDEO_SLOT_CAP + 1)),
+            dropped: AtomicU64::new(0),
+        }
     }
 
+    /// Push (Takion-Thread): bei Überlauf ältesten Frame verwerfen (zählt).
     fn push(&self, sample: VideoSample) -> bool {
-        let mut slot = lock(self.slot.lock());
-        slot.replace(sample).is_none() // false = alter Frame verworfen
+        let mut queue = lock(self.queue.lock());
+        let mut replaced = true;
+        while queue.len() >= VIDEO_SLOT_CAP {
+            queue.pop_front();
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            replaced = false;
+        }
+        queue.push_back(sample);
+        replaced
     }
 
-    fn take(&self) -> Option<VideoSample> {
-        lock(self.slot.lock()).take()
+    /// Pop in FIFO-Reihenfolge (Media-Thread) — dekodiert ALLE Frames.
+    fn pop(&self) -> Option<VideoSample> {
+        lock(self.queue.lock()).pop_front()
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 }
 
@@ -1532,65 +1556,105 @@ pub(crate) mod media {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
 
-            // --- Video: neuesten Sample dekodieren (nur der letzte zählt) ---
-            if let Some(sample) = session.shared_video_slot().take() {
-                let Some(decoder) = decoder.as_mut() else { continue };
-                match decoder
-                    .decode_sample(&sample.data, sample.frames_lost, sample.frame_recovered)
-                {
-                    Ok(Some(frame)) => {
-                        // VSR einmalig mit dem ersten Frame initialisieren
-                        // (C++: init(firstFrame, scalePct), CUDA-Kontext aus
-                        // dem Decoder).
-                        if let (Some(up), false) = (&mut vsr, vsr_inited) {
-                            vsr_inited = up.init(
-                                &frame,
-                                decoder.cuda_context().unwrap_or(std::ptr::null_mut()),
-                                decoder.cuda_stream().unwrap_or(std::ptr::null_mut()),
-                                settings.nv_vsr_scale,
-                            );
-                            session
-                                .telemetry
-                                .vsr_active
-                                .store(up.is_active(), Ordering::Relaxed);
-                            *session
-                                .telemetry
-                                .vsr_error
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner()) =
-                                up.last_error().map(str::to_string);
-                            if let Some(ms) = up.engine_load_ms() {
-                                tracing::info!("VSR: Engine in {ms} ms geladen");
-                            }
-                        }
-                        let mut vsr_used = false;
-                        if vsr_inited {
-                            if let Some(up) = vsr.as_mut() {
-                                vsr_used = up.process_frame(&frame, &mut vsr_buf);
+            // --- Video: ALLE queued Frames in FIFO-Reihenfolge dekodieren ---
+            // (C: video_sample_cb dekodiert jeden Frame; H.265-Referenzkette
+            // bricht sonst → Bildzerreißen bei Bewegung). Angezeigt wird nur
+            // der NEUESTE Frame: jeder decodierter Frame wird sofort nach
+            // NV12 kopiert (DecodedFrame leiht aus dem Decoder-Pool), VSR
+            // läuft auf dem kopierten neuesten Frame (process_frame_nv12).
+            {
+                let mut latest: Option<(NV12Frame, f64, f64, i32, bool)> = None;
+                while let Some(sample) = session.shared_video_slot().pop() {
+                    let Some(decoder) = decoder.as_mut() else { break };
+                    let decoded = decoder.decode_sample(
+                        &sample.data,
+                        sample.frames_lost,
+                        sample.frame_recovered,
+                    );
+                    match decoded {
+                        Ok(Some(frame)) => {
+                            // VSR einmalig mit dem ersten Frame initialisieren
+                            // (C++: init(firstFrame, scalePct), CUDA-Kontext
+                            // aus dem Decoder).
+                            if let (Some(up), false) = (&mut vsr, vsr_inited) {
+                                vsr_inited = up.init(
+                                    &frame,
+                                    decoder.cuda_context().unwrap_or(std::ptr::null_mut()),
+                                    decoder.cuda_stream().unwrap_or(std::ptr::null_mut()),
+                                    settings.nv_vsr_scale,
+                                );
                                 session
                                     .telemetry
                                     .vsr_active
                                     .store(up.is_active(), Ordering::Relaxed);
+                                *session
+                                    .telemetry
+                                    .vsr_error
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner()) =
+                                    up.last_error().map(str::to_string);
+                                if let Some(ms) = up.engine_load_ms() {
+                                    tracing::info!("VSR: Engine in {ms} ms geladen");
+                                }
+                            }
+                            match nv12_from_planes(&frame) {
+                                Ok(nv12) => {
+                                    latest = Some((
+                                        nv12,
+                                        frame.pts,
+                                        frame.duration,
+                                        frame.frames_lost,
+                                        frame.recovered,
+                                    ));
+                                }
+                                Err(err) => {
+                                    tracing::error!("NV12-Kopie fehlgeschlagen: {err:?}")
+                                }
                             }
                         }
-                        let nv12 = if vsr_used {
-                            nv12_from_contiguous(
-                                vsr_buf.width(),
-                                vsr_buf.height(),
-                                vsr_buf.pitch(),
-                                &vsr_buf,
-                            )
-                        } else {
-                            nv12_from_planes(&frame)
-                        };
-                        match nv12 {
-                            Ok(frame) => session.presenter.set_frame(frame),
-                            Err(err) => tracing::error!("NV12-Kopie fehlgeschlagen: {err:?}"),
+                        Ok(None) => {} // vor dem ersten IDR noch kein Frame
+                        Err(err) => tracing::warn!("Decode-Fehler: {err:?}"),
+                    }
+                }
+                let Some((nv12, pts, duration, frames_lost, recovered)) = latest else {
+                    continue;
+                };
+                let vsr_used = if vsr_inited {
+                    vsr.as_mut().is_some_and(|up| {
+                        up.process_frame_nv12(
+                            &nv12.y_plane(),
+                            &nv12.uv_plane(),
+                            nv12.y_stride,
+                            nv12.uv_stride,
+                            nv12.width,
+                            nv12.height,
+                            pts,
+                            duration,
+                            frames_lost,
+                            recovered,
+                            &mut vsr_buf,
+                        )
+                    })
+                } else {
+                    false
+                };
+                let out = if vsr_used {
+                    match nv12_from_contiguous(
+                        vsr_buf.width(),
+                        vsr_buf.height(),
+                        vsr_buf.pitch(),
+                        &vsr_buf,
+                    ) {
+                        Ok(out) => out,
+                        Err(err) => {
+                            tracing::error!("VSR-Output-Kopie fehlgeschlagen: {err:?}");
+                            nv12
                         }
                     }
-                    Ok(None) => {} // vor dem ersten IDR noch kein Frame
-                    Err(err) => tracing::warn!("Decode-Fehler: {err:?}"),
-                }
+                } else {
+                    nv12
+                };
+                session.presenter.set_frame(out);
             }
         }
 
@@ -1966,16 +2030,26 @@ mod tests {
     }
 
     #[test]
-    fn video_slot_drop_oldest() {
+    fn video_slot_fifo_decodiert_alle() {
+        // H.265-Referenzkette: ALLE Frames müssen in FIFO-Reihenfolge beim
+        // Decoder ankommen (C: video_sample_cb dekodiert jeden). Erst bei
+        // Kapazitätsüberlauf wird Drop-Oldest gezählt.
         let slot = VideoSlot::new();
-        assert!(slot.push(VideoSample { data: vec![1], frames_lost: 0, frame_recovered: false }));
-        assert!(
-            !slot.push(VideoSample { data: vec![2], frames_lost: 0, frame_recovered: false }),
-            "zweiter Push verwirft den ersten"
-        );
-        let s = slot.take().expect("Sample da");
-        assert_eq!(s.data, vec![2]);
-        assert!(slot.take().is_none(), "Slot nach take leer");
+        for i in 0..8u8 {
+            assert!(slot.push(VideoSample { data: vec![i], frames_lost: 0, frame_recovered: false }));
+        }
+        for i in 0..8u8 {
+            assert_eq!(slot.pop().expect("FIFO-Ordnung").data, vec![i]);
+        }
+        assert!(slot.pop().is_none());
+        assert_eq!(slot.dropped(), 0);
+
+        // Überlauf: älteste verworfen, Reihenfolge bleibt, Zähler stimmt.
+        for i in 0..(VIDEO_SLOT_CAP + 4) as u8 {
+            slot.push(VideoSample { data: vec![i], frames_lost: 0, frame_recovered: false });
+        }
+        assert_eq!(slot.dropped(), 4);
+        assert_eq!(slot.pop().unwrap().data, vec![4]);
     }
 
     #[test]

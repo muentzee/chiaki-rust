@@ -402,7 +402,7 @@ impl StreamConnection {
             st.state_failed = false;
         }
         if let Err(e) = self.send_big(&takion) {
-            tracing::error!("StreamConnection failed to send big");
+            tracing::error!("StreamConnection failed to send big: {e:?}");
             return self.finish_disconnect(Err(e));
         }
 

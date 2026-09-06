@@ -156,6 +156,9 @@ pub const SESSION_STATE_DATA_CONSOLE_ACCEPTED: u32 = 1 << 15;
 pub const SESSION_STATE_DATA_CLIENT_ACCEPTED: u32 = 1 << 16;
 pub const SESSION_STATE_DATA_ESTABLISHED: u32 = 1 << 17;
 pub const SESSION_STATE_DELETED: u32 = 1 << 18;
+/// KEIN C-Bit (C nutzt websockets++-Fail-Handler): der WS-Connect ist
+/// endgültig fehlgeschlagen — weckt die wartenden Warte-Loops.
+pub const SESSION_STATE_WS_FAILED: u32 = 1 << 31;
 
 // Port von `SessionMessageAction` (Bitmaske, Werte wie im C).
 pub const SESSION_MESSAGE_ACTION_UNKNOWN: u8 = 0;
@@ -249,6 +252,9 @@ struct NotifQueue {
 struct WsState {
     fqdn: Option<String>,
     open: bool,
+    /// Connect-Fehler des WS-Threads (damit der wartende `create()`-Aufruf
+    /// nicht endlos auf ein Offen-Waiten wartet, das nie eintritt).
+    failed: Option<String>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -679,6 +685,7 @@ impl HolepunchSession {
         {
             let mut ws = self.inner.ws.lock().unwrap_or_else(|e| e.into_inner());
             ws.fqdn = Some(fqdn);
+            ws.failed = None; // Reset eines früheren Connect-Fehlers
         }
 
         if self.check_cancel() {
@@ -701,8 +708,11 @@ impl HolepunchSession {
             }
         }
 
-        // Auf WebSocket-Open warten (Cancel-Check hier: Verbesserung ggü. C)
+        // Auf WebSocket-Open warten (Cancel-Check hier: Verbesserung ggü. C).
+        // Mit Gesamt-Timeout + Failed-Signal des WS-Threads — sonst wartet
+        // create() bei Verbindungsfehlern ewig (User-sichtbarer UI-Freeze).
         {
+            let ws_open_deadline = std::time::Instant::now() + Duration::from_secs(30);
             let mut state = self.state_lock();
             while *state & SESSION_STATE_WS_OPEN == 0 {
                 tracing::trace!(
@@ -711,6 +721,24 @@ impl HolepunchSession {
                 if self.check_cancel() {
                     tracing::info!("chiaki_holepunch_session_create: canceled");
                     return Err(ChiakiError::Canceled);
+                }
+                if *state & SESSION_STATE_WS_FAILED != 0 {
+                    let reason = self
+                        .inner
+                        .ws
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .failed
+                        .clone();
+                    tracing::error!(
+                        "chiaki_holepunch_session_create: websocket connect failed: {}",
+                        reason.as_deref().unwrap_or("unknown")
+                    );
+                    return Err(ChiakiError::Network);
+                }
+                if std::time::Instant::now() >= ws_open_deadline {
+                    tracing::error!("chiaki_holepunch_session_create: timed out waiting for websocket to open");
+                    return Err(ChiakiError::Timeout);
                 }
                 let (guard, _) = self
                     .inner
@@ -3219,6 +3247,13 @@ fn websocket_thread_func(inner: Arc<Inner>) {
             );
             let mut ws_state = inner.ws.lock().unwrap_or_else(|e| e.into_inner());
             ws_state.open = false;
+            ws_state.failed = Some(format!("{e:?}"));
+            drop(ws_state);
+            // Den wartenden create()-Aufruf aufwecken (C: websockets++-Handler
+            // feuert fail → state-Notify; ohne das wartet create() ewig).
+            let mut state = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            *state |= SESSION_STATE_WS_FAILED;
+            inner.state_cond.notify_all();
             return;
         }
     };
@@ -3740,19 +3775,28 @@ mod ws {
                 .map_err(|_| ChiakiError::Network)?;
             tls.flush().map_err(|_| ChiakiError::Network)?;
 
-            // Antwort bis \r\n\r\n lesen
+            // Antwort bis \r\n\r\n lesen. Der Read-Timeout (poll_interval) ist
+            // nur das Cancellation-/Poll-Fenster — ein TLS-Handshake über WAN
+            // braucht zwangsläufig länger als 250 ms, daher WouldBlock/
+            // TimedOut als Retry (mit Gesamt-Deadline), NICHT als Fehler.
             let mut resp = Vec::new();
             let mut chunk = [0u8; 1024];
+            let handshake_deadline = std::time::Instant::now() + Duration::from_secs(10);
             loop {
-                let n = tls.read(&mut chunk).map_err(|e| {
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut
+                let n = match tls.read(&mut chunk) {
+                    Ok(n) => n,
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
                     {
-                        ChiakiError::Timeout
-                    } else {
-                        ChiakiError::Network
+                        if std::time::Instant::now() >= handshake_deadline {
+                            tracing::error!("ws: handshake timed out after 10 s");
+                            return Err(ChiakiError::Timeout);
+                        }
+                        continue;
                     }
-                })?;
+                    Err(_) => return Err(ChiakiError::Network),
+                };
                 if n == 0 {
                     tracing::error!("ws: connection closed during handshake");
                     return Err(ChiakiError::Disconnected);

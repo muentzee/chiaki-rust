@@ -751,12 +751,11 @@ impl Session {
     /// `session->rudp`): Holepunch → `CtrlTransport::Holepunch`, sonst TCP.
     fn create_ctrl(shared: &Arc<SessionShared>) -> ChiakiResult<crate::ctrl::Ctrl> {
         let (tx, rx) = mpsc::channel::<crate::ctrl::CtrlMessage>();
-        // Rpcrypt ist nicht Clone (rpcrypt.rs ist fertiggestellt); das Ctrl
-        // übernimmt ihn per value (C: Zeiger auf dasselbe Objekt) — nach
-        // erfolgreicher Ctrl-Erzeugung bleibt er dort.
+        // Rpcrypt teilen — C: derselbe Zeiger geht an Ctrl UND
+        // StreamConnection (launchspec-Verschlüsselung braucht ihn dort).
         let rpcrypt = {
-            let mut guard = shared.rpcrypt.lock().unwrap_or_else(PoisonError::into_inner);
-            guard.take().ok_or(ChiakiError::Uninitialized)?
+            let guard = shared.rpcrypt.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.as_ref().cloned().ok_or(ChiakiError::Uninitialized)?
         };
         // C (ctrl.c:1299): Port/Adresse je Pfad — der Holepunch-Pfad läuft
         // über RUDP (kein TCP-Connect, Adresse ungenutzt), der TCP-Pfad
