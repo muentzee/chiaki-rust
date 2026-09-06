@@ -6,6 +6,9 @@
 // - [`rudp`]:  Port von lib/src/remote/rudp.c (SCE-RUDP-Framing/State-Machine)
 // - [`rudpsendbuffer`]: Port von lib/src/remote/rudpsendbuffer.c (Re-Transmits)
 // - [`holepunch`]: Port von lib/src/remote/holepunch.c (PSN-Holepunching)
+// - [`regist_psn`]: PSN-Regist-Pfad + RUDP-HTTP-Transport (regist.c/session.c/
+//              http.c holepunch-Zweige) + Trait-Bridge zu
+//              chiaki_core::session::HolepunchSession
 // - [`psn`]:   HTTP-Endpunkte/-Payloads aus holepunch.c gebündelt (ureq)
 // - [`psn_auth`]: Port von gui/src/psntoken.cpp + psnaccountid.cpp
 //              (PSN-OAuth2: Token-Tausch/Refresh, Account-ID)
@@ -17,6 +20,7 @@
 pub mod holepunch;
 pub mod psn;
 pub mod psn_auth;
+pub mod regist_psn;
 pub mod rudp;
 pub mod rudpsendbuffer;
 pub mod stun;

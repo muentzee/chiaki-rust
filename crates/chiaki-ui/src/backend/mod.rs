@@ -8,6 +8,7 @@
 pub mod controllers;
 pub mod discovery;
 pub mod events;
+pub mod psn;
 pub mod sessions;
 
 use std::sync::{Arc, Mutex};
@@ -17,7 +18,11 @@ use chiaki_settings::settings::Settings;
 pub use controllers::ControllerHandle;
 pub use discovery::{DiscoveryError, DiscoveryHandle};
 pub use events::{HostId, UiEvent, UiEventQueue, UiEventSender};
-pub use sessions::{ActiveSession, ConnectRequest, LinkQuality, SessionManager};
+pub use psn::{PsnConnectState, PsnDeviceInfo, PsnHandle, PsnUiEvent};
+pub use sessions::{
+    ActiveSession, ConnectRequest, LinkQuality, RegistHandle, RegistRequest, RegistState,
+    SessionManager,
+};
 
 use crate::components::ToastData;
 
@@ -37,6 +42,7 @@ pub struct Backend {
     discovery: DiscoveryHandle,
     controllers: ControllerHandle,
     sessions: SessionManager,
+    psn: PsnHandle,
     queue: Arc<UiEventQueue>,
 }
 
@@ -57,9 +63,15 @@ impl Backend {
         };
 
         let controllers = ControllerHandle::start(sender.clone(), 50);
-        let sessions = SessionManager::new(Arc::clone(&settings), sender);
+        let sessions = SessionManager::new(Arc::clone(&settings), sender.clone(), discovery.clone());
+        let psn = PsnHandle::new();
 
-        Ok(Self { settings, discovery, controllers, sessions, queue })
+        // PSN-Token-Refresh beim App-Start (C++: refreshPsnToken im
+        // QmlBackend-Aufbau) — ohne PSN-Login ein stiller No-Op; bei gültigen
+        // Tokens wird danach die Geräteliste geladen.
+        psn.refresh_tokens_if_needed(Arc::clone(&settings), sender.clone());
+
+        Ok(Self { settings, discovery, controllers, sessions, psn, queue })
     }
 
     /// Settings-Handle (UI sperrt kurz für Getter/Setter).
@@ -79,9 +91,20 @@ impl Backend {
         &self.sessions
     }
 
+    /// PSN-Remote-Handle (Geräteliste, Token-Refresh, Connect-State).
+    pub fn psn(&self) -> &PsnHandle {
+        &self.psn
+    }
+
     /// Alle pending Events (1×/Frame aus der gpui-Event-Loop).
     pub fn poll_events(&self) -> Vec<UiEvent> {
         self.queue.poll()
+    }
+
+    /// Sender-Handle für Hintergrund-Threads, die später Events in die Queue
+    /// schieben (z. B. der PSN-Login-Thread in [`crate::psn_login`]).
+    pub fn event_sender(&self) -> UiEventSender {
+        self.queue.sender()
     }
 
     /// Convenience: Toast in den Event-Stream schieben (Backend-getrieben).

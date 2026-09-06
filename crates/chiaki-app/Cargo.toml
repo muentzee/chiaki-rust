@@ -32,3 +32,7 @@ thiserror.workspace = true
 # (CONVENTIONS.md: kein unsafe, außer wo unvermeidbar).
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# Prozess-Initialisierung des Binaries: HIGH_PRIORITY_CLASS wie gui/src/main.cpp
+# (SetPriorityClass, Win32_System_Threading — Features kommen aus der
+# Workspace-Dep, dort nur Ergänzungen, keine Entfernung).
+windows.workspace = true

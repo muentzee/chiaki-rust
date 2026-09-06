@@ -46,19 +46,51 @@
 // `Ctrl::generate_fallback_session_id()` (String selbst speichern) und
 // `Ctrl::enable_features()` (enqueue, Reihenfolge wie ctrl.c:851-874).
 //
+// # Transportwahl (RUDP / Holepunch-Pfad)
+// ctrl.c verzweigt an allen Netzstellen auf `session->rudp` (gesetzt, wenn
+// `holepunch_session` existiert — PSN Remote Play over Internet): dann läuft
+// der Ctrl-Kanal als SCE-RUDP-CTRL-Messages über den gepunchten Control-Hole
+// statt über TCP. In Rust wählt `CtrlTransport` den Pfad; die RUDP-
+// Protokollfunktionen kommen über das `session::HolepunchSession`-Trait
+// (Implementierung: chiaki-remote, Dependency-Richtung remote → core):
+//
+// | ctrl.c-Stelle                              | RUDP-Verhalten                                                            |
+// |--------------------------------------------|---------------------------------------------------------------------------|
+// | ctrl_connect (1165-1187)                   | INIT/COOKIE-Handshake ("CTRL - Starting RUDP session"), remote_counter    |
+// | ctrl.c:1299                                | HTTP-Port = chiaki_get_ps_ctrl_port (statt SESSION_CTRL_PORT)             |
+// | ctrl.c:1316-1320                           | PS5: crypt_counter_local++ vor dem Request                                |
+// | ctrl.c:1329-1331                           | HTTP-Request/Antwort via chiaki_send_recv_http_header_psn; Timeout-Retry ohne Reconnect |
+// | ctrl.c:1389-1398                           | ACK-Message auf die HTTP-Antwort (remote_counter)                         |
+// | ctrl_thread_func select (466-467)          | Empfang wartet am RUDP-Socket (hier: Empfangs-Timeout als Poll, siehe unten) |
+// | ctrl_thread_func recv (514-600)            | chiaki_rudp_recv_only + Subtype-Dispatch (0x12/0x26/0x36/0x02/0x24/0xC0/default), Ctrl-Frames in recv_buf |
+// | ctrl_message_send (651-655, 674-689)       | Frame via chiaki_rudp_send_ctrl_message ( LOGIN_PIN_REP-Sonderfall: zähleridentisch, ein Pfad) |
+//
 // # Bekannte Abweichungen vom C (alle dokumentiert)
-// - RUDP-Pfad (session->rudp, holepunch): NICHT portiert — die rudp-Typen
-//   liegen in chiaki-remote (Dependency-Richtung remote→core), ctrl.c's
-//   RUDP-Zweige (ctrl.c:466-470, 514-600, 1165-1187, 1316-1331, 1389-1398)
-//   sind daher nur für den TCP-Pfad 1:1. Ein späterer RUDP-Support erfordert
-//   einen Transport-Trait oder eine Verschiebung von rudp in core.
+// - RUDP-Empfang: das C selectiert blockierend (UINT64_MAX) und recv't dann;
+//   hier pollt der Loop mit Empfangs-Timeout (TCP: RECV_POLL, RUDP:
+//   RUDP-recv-Timeout der Trait-Impl), damit stop()/Queue/PIN weiter bedient
+//   werden — `Err(Timeout)` wird wie "nichts empfangen" behandelt (das C
+//   bricht bei recv-Fehlern ab, kann dort aber nie Timeout sehen).
+// - ctrl_message_send RUDP-Zweig: das C trunciert `uint8_t buf_size =
+//   8 + payload_size` (Überlauf/UB für Payloads > 247 Bytes); hier läuft der
+//   volle Frame raus (Ctrl-Payloads sind klein — recv_buf-Grenze 512).
+// - ctrl.c:651-655 (LOGIN_PIN_REP im RUDP-Pfad): `local_counter =
+//   crypt_counter_local++; encrypt(local_counter - 1, ...)` ist mathematisch
+//   identisch zum sonstigen Pfad (`encrypt(crypt_counter_local++)`) — ein
+//   gemeinsamer Codepfad.
+// - recv_buf-Memcpy-Guard (ctrl.c:554/578): das C kopiert die Ctrl-Frames
+//   ohne Größenprüfung in recv_buf[512] (mögliches Overflow-UB); hier wird
+//   wie beim Framing-Overflow "Ctrl buffer overflow!" + ctrl_failed(Unknown)
+//   gemeldet.
+// - SUB-Message-/ACK-Lesezugriffe (data[2..4]) sind im C ungeprüft; hier
+//   bounds-geprüft (Überspringen statt OOB).
 // - ctrl_enable_features/ctrl_message_toggle_microphone senden im C direkt
 //   auf ctrl->sock (aus einem fremden Thread — Race im Original); in Rust
 //   wird alles über die Message-Queue an den Ctrl-Thread gegeben
 //   (wire-identisch, Latenz <= RECV_POLL).
 // - notif_pipe: entfällt; stattdessen pollt der Ctrl-Loop Socket + Queue mit
-//   `RECV_POLL` (Reaktionszeit auf stop()/Nachrichten <= RECV_POLL), wie in
-//   stoppipe.rs für std ohne select() dokumentiert.
+//   `RECV_POLL` (Reaktionszeit auf stop()/Nachrichten <= RECV_POLL bzw.
+//   RUDP-Empfangs-Timeout), wie in stoppipe.rs für std ohne select() dokumentiert.
 // - Memory-Safety-Guards: DISPLAYA/DISPLAYB lesen im C payload[0]/[1] ohne
    // Größenprüfung (mögliches OOB); hier >=1 bzw. >=2 Bytes erzwungen.
 // - Keyboard open/text change: C assert(payload_size == header+text_length);
@@ -77,6 +109,7 @@ use super::error::{ChiakiError, ChiakiResult, Codec, Target};
 use super::http::{recv_http_header, response_parse, HttpResponse};
 use super::random::random_bytes_crypt;
 use super::rpcrypt::{Rpcrypt, RPCRYPT_KEY_SIZE};
+use super::session::HolepunchSession;
 use super::sock::map_io_error;
 use super::stoppipe::StopPipe;
 use super::time::now_ms;
@@ -90,13 +123,34 @@ pub const SESSION_ID_SIZE_MAX: usize = 80;
 /// `CTRL_EXPECT_TIMEOUT` (ms, ctrl.c)
 pub const CTRL_EXPECT_TIMEOUT_MS: u64 = 5000;
 
-/// `SESSION_OSTYPE` (ctrl.c) — wird inkl. NUL verschlüsselt gesendet.
-const SESSION_OSTYPE: &str = "Win10.0.0";
-
 /// C: `uint8_t recv_buf[512]` — harte Protokollgrenze für Frames.
 const CTRL_RECV_BUF_SIZE: usize = 512;
+/// C: `uint8_t rudp_recv_buf[520]` (ctrl.h) — Empfangspuffergröße für
+/// `chiaki_rudp_recv_only` (genutzt wird `520 - recv_buf_size`).
+const CTRL_RUDP_RECV_BUF_SIZE: usize = 520;
 /// Poll-Intervall des Ctrl-Loops (std kennt kein select(); siehe Moduldoku).
 const RECV_POLL: Duration = Duration::from_millis(50);
+
+/// C: `SESSION_OSTYPE` (ctrl.c) — wird inkl. NUL verschlüsselt gesendet.
+const SESSION_OSTYPE: &str = "Win10.0.0";
+
+/// Transport des Ctrl-Kanals (C: die `session->rudp`-Verzweigungen).
+#[derive(Clone)]
+pub enum CtrlTransport {
+    /// TCP-Pfad: Ctrl verbindet selbst zu `CtrlInit::host_addr` (Port 9295)
+    /// bzw. übernimmt `CtrlInit::sock` (ctrl_connect_tcp, ctrl.c:328-405).
+    Tcp,
+    /// PSN-Holepunch-Pfad: RUDP über die `HolepunchSession` (ctrl.c-Zweige an
+    /// 466, 514, 651, 674, 1165, 1316, 1389 — siehe Moduldoku-Tabelle).
+    Holepunch(Arc<dyn HolepunchSession>),
+}
+
+impl CtrlTransport {
+    /// C: `if(ctrl->session->rudp)`.
+    fn is_rudp(&self) -> bool {
+        matches!(self, CtrlTransport::Holepunch(_))
+    }
+}
 
 /// `ctrl_message_type_t` (ctrl.c) — Werte sind protokollrelevant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -202,11 +256,17 @@ pub struct CtrlInit {
     /// session->connect_info.hostname (für den HTTP Host-Header).
     pub hostname: String,
     /// Aufgelöste Host-Adresse mit Ctrl-Port (0.0.0.0/:: durch den Aufrufer auf
-    /// `SESSION_CTRL_PORT` gesetzt). Wirklich relevant nur für (Re-)Connect.
+    /// `SESSION_CTRL_PORT` gesetzt). Wirklich relevant nur für (Re-)Connect im
+    /// TCP-Pfad; im Holepunch-Pfad ungenutzt (C: Port aus der Holepunch-
+    /// Session, ctrl.c:1299).
     pub host_addr: SocketAddr,
     /// Bereits verbundener Ctrl-Socket (falls die Session den Connect selbst
     /// macht); `None` = Ctrl verbindet selbst zu `host_addr` (wie ctrl.c).
+    /// Nur im TCP-Pfad (`transport: CtrlTransport::Tcp`) relevant.
     pub sock: Option<TcpStream>,
+    /// Transportwahl (C: die `session->rudp`-Verzweigungen): TCP oder RUDP
+    /// über die Holepunch-Session.
+    pub transport: CtrlTransport,
     /// connect_info.video_profile.codec (RP-StreamingType-Header, PS5).
     pub codec: Codec,
     /// connect_info.enable_dualsense.
@@ -249,16 +309,19 @@ struct CtrlShared {
 
 /// Port von `ChiakiCtrl`.
 ///
-/// Thread-Modell wie im C: ein Ctrl-Thread besitzt den Socket und verarbeitet
-/// Framing/Queue; die öffentliche API (`&self`) stellt Nachrichten ein bzw.
-/// setzt Flags. RUDP-Pfad des C nicht portiert (siehe Moduldoku).
+/// Thread-Modell wie im C: ein Ctrl-Thread besitzt den Socket (bzw. die
+/// Holepunch-Session) und verarbeitet Framing/Queue; die öffentliche API
+/// (`&self`) stellt Nachrichten ein bzw. setzt Flags.
 pub struct Ctrl {
     shared: Arc<CtrlShared>,
     msg_queue_tx: Sender<CtrlMessage>,
     msg_queue_rx: Option<Receiver<CtrlMessage>>,
-    /// Vor-verbundener Socket aus CtrlInit (wird bei start() an den Thread
+    /// Vor-verbundener Socket aus CtrlInit (wird bei `start()` an den Thread
     /// übergeben).
     init_sock: Option<TcpStream>,
+    /// Transportwahl aus CtrlInit (wird bei `start()` an den Thread
+    /// übergeben).
+    transport: Option<CtrlTransport>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -287,6 +350,7 @@ impl Ctrl {
             msg_queue_tx: init.msg_queue_tx,
             msg_queue_rx: Some(init.msg_queue_rx),
             init_sock: init.sock,
+            transport: Some(init.transport),
             thread: Mutex::new(None),
         })
     }
@@ -303,9 +367,10 @@ impl Ctrl {
             .ok_or(ChiakiError::Uninitialized)?;
         let shared = Arc::clone(&self.shared);
         let init_sock = self.init_sock.take();
+        let transport = self.transport.take().ok_or(ChiakiError::Uninitialized)?;
         *thread = Some(std::thread::Builder::new()
             .name("Chiaki Ctrl".to_string())
-            .spawn(move || ctrl_thread_func(shared, init_sock, rx))
+            .spawn(move || ctrl_thread_func(shared, transport, init_sock, rx))
             .map_err(|_| ChiakiError::Thread)?);
         Ok(())
     }
@@ -532,6 +597,18 @@ fn build_keyboard_text_request(counter: u32, text: &str) -> Vec<u8> {
     payload
 }
 
+/// `rudp_packet_type_data_offset()` (ctrl.c:103-114): Offset des MACs bzw.
+/// des Ctrl-Frames innerhalb der Data einer RUDP-Message je Subtype
+/// (default 2 = hinter dem lokalen Counter; das C liefert "unbekannt" als
+/// -1, benutzt den Wert aber nie -1 — hier direkt 2).
+fn rudp_packet_type_data_offset(subtype: u8) -> usize {
+    match subtype {
+        0x12 => 8,
+        0x26 => 6,
+        _ => 2,
+    }
+}
+
 /// `ctrl_message_set_fallback_session_id()` — Erzeugungsteil:
 /// snprintf(fallback, 16, "%lld", monotonic_ms / 1000) + base64(48 random
 /// bytes) (64 Zeichen) → String mit 65..=79 Zeichen.
@@ -693,9 +770,24 @@ fn enqueue_enable_features(
 // Ctrl-Thread
 // ---------------------------------------------------------------------------
 
-/// Thread-lokaler Zustand (C: ctrl->sock, recv_buf, counters, cant_display*).
+/// Ergebnis eines Empfangsvorgangs im Ctrl-Loop.
+enum Receive {
+    /// recv_buf hat Zuwachs (TCP: n rohe Bytes; RUDP: Ctrl-Frames angehängt).
+    Data,
+    /// Nichts empfangen (Poll-/Empfangs-Timeout) — Schleife fortsetzen.
+    Nothing,
+    /// Sauberes EOF (nur TCP-Pfad) — Schleife beenden ohne ctrl_failed.
+    Eof,
+    /// recv_buf-Überlauf — ctrl_failed(Unknown) + Ende (siehe
+    /// [`CtrlThread::rudp_try_append_ctrl_frame`]).
+    Overflow,
+}
+
+/// Thread-lokaler Zustand (C: ctrl->sock, recv_buf/rudp_recv_buf, counters,
+/// cant_display*).
 struct CtrlThread {
     shared: Arc<CtrlShared>,
+    transport: CtrlTransport,
     init_sock: Option<TcpStream>,
     sock: Option<TcpStream>,
     recv_buf: [u8; CTRL_RECV_BUF_SIZE],
@@ -709,11 +801,13 @@ struct CtrlThread {
 
 fn ctrl_thread_func(
     shared: Arc<CtrlShared>,
+    transport: CtrlTransport,
     init_sock: Option<TcpStream>,
     msg_queue_rx: Receiver<CtrlMessage>,
 ) {
     let mut thread = CtrlThread {
         shared,
+        transport,
         init_sock,
         sock: None,
         recv_buf: [0u8; CTRL_RECV_BUF_SIZE],
@@ -737,7 +831,8 @@ fn ctrl_thread_func(
 
     tracing::info!("Ctrl connected");
     thread.message_loop(&msg_queue_rx);
-    // C: ctrl_disconnect_tcp am Schleifenende (TCP-Pfad); Rust: Drop.
+    // C (ctrl.c:622-629): nur der TCP-Pfad schließt den Socket; die
+    // Rudp-Instanz gehört der Holepunch-Session und bleibt offen.
     thread.sock = None;
 }
 
@@ -784,18 +879,32 @@ impl CtrlThread {
         self.sock = None; // CHIAKI_SOCKET_CLOSE
     }
 
-    /// `ctrl_connect()` (ctrl.c:1156-1486), TCP-Pfad: TCP-Verbindung +
+    /// `ctrl_connect()` (ctrl.c:1156-1486): Verbindung je Transport
+    /// (TCP: ctrl_connect_tcp — RUDP: INIT/COOKIE-Handshake) +
     /// HTTP-Handshake (RP-Auth etc.) + RP-Server-Type-Auswertung.
     fn connect_and_handshake(&mut self) -> ChiakiResult<()> {
         self.crypt_counter_local = 0;
         self.crypt_counter_remote = 0;
 
-        // Verbindung: vor-verbundener Socket aus CtrlInit übernehmen oder
-        // selbst verbinden (wie ctrl.c).
-        if let Some(sock) = self.init_sock.take() {
-            self.sock = Some(sock);
-        } else {
-            self.ctrl_connect_tcp()?;
+        // C: `uint16_t remote_counter = 0;` — nur im RUDP-Pfad relevant.
+        let mut remote_counter = 0u16;
+
+        // Verbindung (ctrl.c:1165-1193).
+        match &self.transport {
+            CtrlTransport::Holepunch(holepunch) => {
+                // C: "CTRL - Starting RUDP session" + INIT/COOKIE-Handshake;
+                // remote_counter ist der der Cookie-Antwort.
+                remote_counter = holepunch.rudp_ctrl_start_session()?;
+            }
+            CtrlTransport::Tcp => {
+                // Vor-verbundener Socket aus CtrlInit übernehmen oder selbst
+                // verbinden (wie ctrl.c).
+                if let Some(sock) = self.init_sock.take() {
+                    self.sock = Some(sock);
+                } else {
+                    self.ctrl_connect_tcp()?;
+                }
+            }
         }
 
         // uint8_t auth_enc[CHIAKI_RPCRYPT_KEY_SIZE] <- regist_key
@@ -866,8 +975,13 @@ impl CtrlThread {
             "/sie/ps4/rp/sess/ctrl"
         };
         let rp_version = rp_version_string(self.shared.target).unwrap_or("");
-        // C: holepunch_ctrl_port bei rudp — hier immer SESSION_CTRL_PORT.
-        let port = SESSION_CTRL_PORT;
+        // C (ctrl.c:1299): int port = session->holepunch_session
+        //     ? chiaki_get_ps_ctrl_port(session->holepunch_session)
+        //     : SESSION_CTRL_PORT;
+        let port = match &self.transport {
+            CtrlTransport::Holepunch(holepunch) => holepunch.ps_ctrl_port(),
+            CtrlTransport::Tcp => SESSION_CTRL_PORT,
+        };
 
         // request_fmt (ctrl.c:1274-1289), exakt gleiche Zeilen/Reihenfolge.
         let request = format!(
@@ -899,32 +1013,53 @@ impl CtrlThread {
         tracing::info!("Sending ctrl request");
         tracing::trace!("Ctrl request:\n{request}");
 
+        // C (ctrl.c:1316-1320): im RUDP-Pfad verbraucht PS5 einen zusätzlichen
+        // crypt_counter_local vor dem HTTP-Request.
+        if self.transport.is_rudp() && self.shared.target.is_ps5() {
+            self.crypt_counter_local += 1;
+        }
+
         let mut ctrl_request_retry = false;
         let mut buf = [0u8; 512];
         let (header_size, received_size) = loop {
-            let result = match self.sock.as_mut() {
-                Some(sock) => send_fully(
-                    &self.shared.stop_pipe,
-                    sock,
-                    request.as_bytes(),
-                    CTRL_EXPECT_TIMEOUT_MS,
-                )
-                .and_then(|()| {
-                    recv_http_header(
+            // C (ctrl.c:1327-1343): RUDP — Request/Antwort über
+            // chiaki_send_recv_http_header_psn; TCP — send + recv_http_header.
+            let result = match &self.transport {
+                CtrlTransport::Holepunch(holepunch) => holepunch
+                    .rudp_send_recv_http_header(request.as_bytes(), remote_counter, &mut buf)
+                    .map(|(header_size, received_size, new_remote_counter)| {
+                        // C: chiaki_send_recv_http_header_psn aktualisiert
+                        // *remote_counter (für das ACK nach der Antwort).
+                        remote_counter = new_remote_counter;
+                        (header_size, received_size)
+                    }),
+                CtrlTransport::Tcp => match self.sock.as_mut() {
+                    Some(sock) => send_fully(
+                        &self.shared.stop_pipe,
                         sock,
-                        &mut buf,
-                        Some(&self.shared.stop_pipe),
+                        request.as_bytes(),
                         CTRL_EXPECT_TIMEOUT_MS,
                     )
-                }),
-                None => Err(ChiakiError::Disconnected),
+                    .and_then(|()| {
+                        recv_http_header(
+                            sock,
+                            &mut buf,
+                            Some(&self.shared.stop_pipe),
+                            CTRL_EXPECT_TIMEOUT_MS,
+                        )
+                    }),
+                    None => Err(ChiakiError::Disconnected),
+                },
             };
 
             match result {
                 Err(ChiakiError::Timeout) if !ctrl_request_retry => {
                     tracing::info!("Initial ctrl startup request timed out, resending ...");
                     ctrl_request_retry = true;
-                    if !self.shared.stop_pipe.is_set() {
+                    // C (ctrl.c:1350-1356): nur der TCP-Pfad verbindet neu;
+                    // der RUDP-Pfad sendet einfach erneut.
+                    if matches!(self.transport, CtrlTransport::Tcp) && !self.shared.stop_pipe.is_set()
+                    {
                         self.ctrl_disconnect_tcp();
                         self.ctrl_connect_tcp()?;
                     }
@@ -933,6 +1068,16 @@ impl CtrlThread {
                 other => break other?,
             }
         };
+
+        // C (ctrl.c:1389-1398): RUDP — ACK auf die HTTP-Antwort senden. (Das C
+        // setzt bei Fehler quit_reason SESSION_REQUEST_UNKNOWN, das vom
+        // ctrl_thread_func jedoch sofort mit CTRL_CONNECT_FAILED überschrieben
+        // wird — hier daher nur der Fehler selbst.)
+        if let CtrlTransport::Holepunch(holepunch) = &self.transport {
+            holepunch.rudp_send_ack_message(remote_counter).inspect_err(|_| {
+                tracing::error!("CTRL - Failed to send rudp ctrl request response ack message");
+            })?;
+        }
 
         tracing::info!("Ctrl received http header as response");
         tracing::trace!(
@@ -998,7 +1143,8 @@ impl CtrlThread {
         Ok(())
     }
 
-    /// `ctrl_thread_func`-Hauptschleife (ctrl.c:425-619), TCP-Pfad.
+    /// `ctrl_thread_func`-Hauptschleife (ctrl.c:425-619): Framing + Queue,
+    /// Empfang je Transport (RUDP-Zweig 514-600 / TCP-Zweig 601-615).
     fn message_loop(&mut self, msg_queue_rx: &Receiver<CtrlMessage>) {
         loop {
             // ---- Framing: alle vollständigen Frames aus recv_buf parsen ----
@@ -1060,56 +1206,206 @@ impl CtrlThread {
                 break;
             }
 
-            // ---- Empfangen (Poll wie in stoppipe.rs dokumentiert) ----
-            let received = match self.sock.as_mut() {
-                Some(sock) => match sock.set_read_timeout(Some(RECV_POLL)) {
-                    Ok(()) => match sock.read(&mut self.recv_buf[self.recv_buf_size..]) {
-                        Ok(n) => Ok(n),
-                        Err(e)
-                            if e.kind() == ErrorKind::WouldBlock
-                                || e.kind() == ErrorKind::TimedOut =>
-                        {
-                            Err(ChiakiError::Timeout)
-                        }
-                        Err(e) => Err(map_io_error(&e)),
-                    },
-                    Err(_) => Err(ChiakiError::Network),
-                },
-                None => Err(ChiakiError::Disconnected),
+            // ---- Empfangen (RUDP-Zweig ctrl.c:514-600, TCP-Zweig
+            //      ctrl.c:601-615; Poll-Adaption siehe Moduldoku) ----
+            let received = if self.transport.is_rudp() {
+                self.receive_rudp()
+            } else {
+                self.receive_tcp()
             };
-
             match received {
-                Ok(0) => {
+                Ok(Receive::Data) => {}
+                Ok(Receive::Nothing) => continue,
+                Ok(Receive::Eof) => {
                     // C: received == 0 -> sauberes EOF, kein ctrl_failed.
                     break;
                 }
-                Ok(n) => {
-                    tracing::info!("CTRL RECEIVED");
-                    tracing::trace!("Ctrl recv: {:02x?}", &self.recv_buf[self.recv_buf_size..self.recv_buf_size + n]);
-                    self.recv_buf_size += n;
-                }
-                Err(ChiakiError::Timeout) => continue,
-                Err(err) => {
-                    tracing::error!("Ctrl failed to recv: {err}");
+                Ok(Receive::Overflow) => {
                     self.ctrl_failed(CtrlQuitReason::Unknown);
+                    break;
+                }
+                Err(_) => {
+                    // ctrl_failed ist bereits im Empfangszweig gelaufen.
                     break;
                 }
             }
         }
     }
 
+    /// C (ctrl.c:601-615): roher TCP-Empfang in recv_buf.
+    fn receive_tcp(&mut self) -> ChiakiResult<Receive> {
+        let received = match self.sock.as_mut() {
+            Some(sock) => match sock.set_read_timeout(Some(RECV_POLL)) {
+                Ok(()) => match sock.read(&mut self.recv_buf[self.recv_buf_size..]) {
+                    Ok(n) => Ok(n),
+                    Err(e)
+                        if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut =>
+                    {
+                        Err(ChiakiError::Timeout)
+                    }
+                    Err(e) => Err(map_io_error(&e)),
+                },
+                Err(_) => Err(ChiakiError::Network),
+            },
+            None => Err(ChiakiError::Disconnected),
+        };
+        match received {
+            Ok(0) => Ok(Receive::Eof),
+            Ok(n) => {
+                tracing::info!("CTRL RECEIVED");
+                tracing::trace!(
+                    "Ctrl recv: {:02x?}",
+                    &self.recv_buf[self.recv_buf_size..self.recv_buf_size + n]
+                );
+                self.recv_buf_size += n;
+                Ok(Receive::Data)
+            }
+            Err(ChiakiError::Timeout) => Ok(Receive::Nothing),
+            Err(err) => {
+                tracing::error!("Ctrl failed to recv: {err}");
+                self.ctrl_failed(CtrlQuitReason::Unknown);
+                Err(err)
+            }
+        }
+    }
+
+    /// C (ctrl.c:514-600): RUDP-Message empfangen
+    /// (`chiaki_rudp_recv_only` mit `sizeof(rudp_recv_buf) - recv_buf_size`),
+    /// je Subtype ACKs/Send-Buffer-ACKs ausführen und die transportierten
+    /// Ctrl-Frames in recv_buf übernehmen — inkl. der Sub-Message-Kette
+    /// (ctrl.c:583-599). Die eigentliche Framing-Auswertung passiert wie im C
+    /// am Schleifenanfang von [`Self::message_loop`].
+    fn receive_rudp(&mut self) -> ChiakiResult<Receive> {
+        let holepunch = match &self.transport {
+            CtrlTransport::Holepunch(holepunch) => Arc::clone(holepunch),
+            CtrlTransport::Tcp => return self.receive_tcp(),
+        };
+
+        let mut message =
+            match holepunch.rudp_recv_only(CTRL_RUDP_RECV_BUF_SIZE - self.recv_buf_size) {
+                Ok(message) => message,
+                // Poll-Adaption (Moduldoku): Timeout = nichts empfangen
+                // (das C blockiert hinter dem select und kann hier nie
+                // Timeout sehen).
+                Err(ChiakiError::Timeout) => return Ok(Receive::Nothing),
+                Err(err) => {
+                    tracing::error!("Failed to receive Rudp ctrl packet");
+                    self.ctrl_failed(CtrlQuitReason::Unknown);
+                    return Err(err);
+                }
+            };
+        if message.data.len() < 4 {
+            tracing::error!("Rudp ctrl message response too small");
+            holepunch.rudp_print_message(&message);
+            self.ctrl_failed(CtrlQuitReason::Unknown);
+            return Err(ChiakiError::InvalidResponse);
+        }
+        let remote_counter = message.remote_counter;
+        // C: ack_counter bleibt über die Sub-Message-Kette hinweg bestehen und
+        // wird im default-Zweig ggf. unverändert (0) benutzt.
+        let mut ack_counter = 0u16;
+        loop {
+            // C: "switch(message.subtype) // wrong but works ..."
+            match message.subtype {
+                // Fallthrough im C: erst Send-Buffer-ACK, dann der 0x02-Body.
+                0x12 | 0x26 | 0x36 => {
+                    if message.data.len() >= 4 {
+                        ack_counter = u16::from_be_bytes([message.data[2], message.data[3]]);
+                    }
+                    let _ = holepunch.rudp_ack_packet(ack_counter);
+                    let _ = holepunch.rudp_send_ack_message(remote_counter);
+                    let offset = rudp_packet_type_data_offset(message.subtype);
+                    if !self.rudp_try_append_ctrl_frame(&message.data, offset) {
+                        return Ok(Receive::Overflow);
+                    }
+                }
+                0x02 => {
+                    let _ = holepunch.rudp_send_ack_message(remote_counter);
+                    let offset = rudp_packet_type_data_offset(message.subtype);
+                    if !self.rudp_try_append_ctrl_frame(&message.data, offset) {
+                        return Ok(Receive::Overflow);
+                    }
+                }
+                0x24 => {
+                    if message.data.len() >= 4 {
+                        ack_counter = u16::from_be_bytes([message.data[2], message.data[3]]);
+                    }
+                    let _ = holepunch.rudp_ack_packet(ack_counter);
+                }
+                0xC0 => {
+                    tracing::info!("Received rudp finish message, stopping ctrl.");
+                    self.ctrl_failed(CtrlQuitReason::Unknown);
+                    // C: kein Abbruch — die Session sieht ctrl_failed und
+                    // stoppt das Ctrl; der Loop läuft hier weiter.
+                }
+                _ => {
+                    tracing::info!("Received message of unknown type: {:#04x}", message.type_);
+                    let _ = holepunch.rudp_ack_packet(ack_counter);
+                    let _ = holepunch.rudp_send_ack_message(remote_counter);
+                    // we already checked before if data size was at least 4
+                    let offset = 4;
+                    if !self.rudp_try_append_ctrl_frame(&message.data, offset) {
+                        return Ok(Receive::Overflow);
+                    }
+                }
+            }
+            // C (ctrl.c:583-599): zur Sub-Message weitergehen oder fertig
+            // (pointers_free — hier RAII).
+            match message.sub_message.take() {
+                Some(sub) => message = *sub,
+                None => break,
+            }
+        }
+        Ok(Receive::Data)
+    }
+
+    /// C (ctrl.c:546-556/570-580): prüft, ob hinter `offset` ein gültiger
+    /// Ctrl-Frame liegt (8-Byte-Header, payload_size passt zur Restlänge) und
+    /// hängt Header+Payload an recv_buf. `false` = recv_buf-Überlauf (das C
+    /// memcpy'd hier ungeprüft — mögliches UB; hier kontrolliert wie beim
+    /// Framing-Overflow).
+    fn rudp_try_append_ctrl_frame(&mut self, data: &[u8], offset: usize) -> bool {
+        // ctrl message header is 8 bytes
+        if data.len() < offset + 8 {
+            // C: `break` im switch — nichts tun.
+            return true;
+        }
+        let ctrl_payload_size =
+            u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+                as usize;
+        let frame_len = data.len() - offset;
+        // check if message is ctrl message by making sure the payload size
+        // (size of message - 8 byte header) is correct
+        if frame_len - 8 == ctrl_payload_size {
+            if self.recv_buf_size + frame_len > CTRL_RECV_BUF_SIZE {
+                tracing::error!("Ctrl buffer overflow!");
+                return false;
+            }
+            self.recv_buf[self.recv_buf_size..self.recv_buf_size + frame_len]
+                .copy_from_slice(&data[offset..]);
+            self.recv_buf_size += frame_len;
+        }
+        true
+    }
+
     fn should_stop(&self) -> bool {
         self.shared.stop_pipe.is_set()
     }
 
-    /// `ctrl_message_send()` (ctrl.c:634-712), TCP-Pfad: Payload
-    /// verschlüsseln (crypt_counter_local++), Header+Payload senden.
+    /// `ctrl_message_send()` (ctrl.c:634-712): Payload verschlüsseln
+    /// (crypt_counter_local++), Frame je Transport senden (TCP: send_fully —
+    /// RUDP: chiaki_rudp_send_ctrl_message, ctrl.c:674-689).
     fn message_send(&mut self, msg_type: u16, payload: &[u8]) -> ChiakiResult<()> {
         tracing::trace!("Ctrl sending message type {msg_type:#x}, size {}", payload.len());
         if !payload.is_empty() {
             tracing::trace!("Ctrl send payload: {:02x?}", payload);
         }
 
+        // C (ctrl.c:651-657): der LOGIN_PIN_REP-"Sonderfall" im RUDP-Pfad
+        // (`local_counter = crypt_counter_local++;
+        // encrypt(local_counter - 1, ...)`) ist zähleridentisch zum
+        // allgemeinen Pfad (`encrypt(crypt_counter_local++, ...)`) —
+        // gemeinsamer Codepfad.
         let frame = encrypt_message(
             &mut self.crypt_counter_local,
             &self.shared.rpcrypt,
@@ -1118,15 +1414,25 @@ impl CtrlThread {
         )
         .inspect_err(|_| tracing::error!("Ctrl failed to encrypt payload"))?;
 
-        let sock = self.sock.as_mut().ok_or(ChiakiError::Disconnected)?;
-        send_fully(
-            &self.shared.stop_pipe,
-            sock,
-            &frame,
-            CTRL_EXPECT_TIMEOUT_MS,
-        )
-        .inspect_err(|_| tracing::error!("Failed to send Ctrl Message"))?;
-        Ok(())
+        match &self.transport {
+            // C (ctrl.c:674-689): kompletter Frame (Header + verschlüsselter
+            // Payload) als RUDP-CTRL-Message. (Das C trunciert `uint8_t
+            // buf_size = 8 + payload_size` — hier fährt der volle Frame raus,
+            // siehe Moduldoku.)
+            CtrlTransport::Holepunch(holepunch) => holepunch
+                .rudp_send_ctrl_message(&frame)
+                .inspect_err(|_| tracing::error!("Failed to send Ctrl Message")),
+            CtrlTransport::Tcp => {
+                let sock = self.sock.as_mut().ok_or(ChiakiError::Disconnected)?;
+                send_fully(
+                    &self.shared.stop_pipe,
+                    sock,
+                    &frame,
+                    CTRL_EXPECT_TIMEOUT_MS,
+                )
+                .inspect_err(|_| tracing::error!("Failed to send Ctrl Message"))
+            }
+        }
     }
 
     /// `ctrl_message_received()` (ctrl.c:795-849): Payload entschlüsseln
@@ -1522,7 +1828,7 @@ fn stop_pipe_connect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+    use std::net::{TcpListener, UdpSocket};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -2045,6 +2351,7 @@ mod tests {
             hostname: "127.0.0.1".to_string(),
             host_addr,
             sock: None,
+            transport: CtrlTransport::Tcp,
             codec: Codec::H264,
             enable_dualsense: false,
             enable_keyboard: false,
@@ -2133,6 +2440,7 @@ mod tests {
             hostname: "127.0.0.1".to_string(),
             host_addr,
             sock: None,
+            transport: CtrlTransport::Tcp,
             codec: Codec::H264,
             enable_dualsense: false,
             enable_keyboard: false,
@@ -2161,6 +2469,732 @@ mod tests {
         );
 
         ctrl.join().unwrap();
+    }
+
+    // ---- RUDP-Loopback (Muster aus chiaki-remote/src/regist_psn.rs-Tests:
+    //      simulierter Konsole-Peer über 127.0.0.1-UDP mit RUDP-Handshake,
+    //      dann Ctrl-Messages) ----
+    //
+    // chiaki-core darf chiaki-remote nicht als Dependency ziehen — das
+    // minimale RUDP-Wire-Codec hier spiegelt chiaki-remote::rudp (dort
+    // golden-geprüft); die Client-Trait-Impl spiegelt die Produktions-Impl
+    // in regist_psn.rs.
+
+    /// RUDP_CONSTANT (rudp.c).
+    const T_RUDP_CONSTANT: u32 = 0x244F_244F;
+    /// RudpPacketType-Werte (rudp.rs / rudp.h).
+    const T_INIT_REQUEST: u16 = 0x8030;
+    const T_INIT_RESPONSE: u16 = 0xD000;
+    const T_COOKIE_REQUEST: u16 = 0x9030;
+    const T_COOKIE_RESPONSE: u16 = 0xA030;
+    const T_SESSION_MESSAGE: u16 = 0x2030;
+    const T_ACK: u16 = 0x2430;
+    const T_CTRL_MESSAGE: u16 = 0x0230;
+    /// Offset8 (Subtype 0x12, ctrl.c-Dispatch).
+    const T_OFFSET8: u16 = 0x1230;
+    const T_FINISH: u16 = 0xC000;
+
+    /// Vom Test als ps_ctrl_port gemeldeter Port (bewusst != 9295, um den
+    /// ctrl.c:1299-Zweig zu prüfen).
+    const TEST_PS_CTRL_PORT: u16 = 9300;
+    /// ps_selected_addr-Äquivalent der Test-Holepunch-Session.
+    const TEST_PS_SELECTED_ADDR: &str = "10.0.0.1";
+
+    #[derive(Debug, Clone)]
+    struct TMsg {
+        subtype: u8,
+        type_: u16,
+        data: Vec<u8>,
+        sub: Option<Box<TMsg>>,
+        remote_counter: u16,
+    }
+
+    fn rudp_frame(type_: u16, data: Vec<u8>) -> TMsg {
+        TMsg {
+            subtype: (type_ >> 8) as u8,
+            type_,
+            data,
+            sub: None,
+            remote_counter: 0,
+        }
+    }
+
+    /// `rudp_message_serialize` (eine Ebene + Sub-Message).
+    fn t_serialize(msg: &TMsg) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + msg.data.len());
+        out.extend_from_slice(&(((0xC << 12) | (8 + msg.data.len())) as u16).to_be_bytes());
+        out.extend_from_slice(&T_RUDP_CONSTANT.to_be_bytes());
+        out.extend_from_slice(&msg.type_.to_be_bytes());
+        out.extend_from_slice(&msg.data);
+        if let Some(sub) = &msg.sub {
+            out.extend_from_slice(&t_serialize(sub));
+        }
+        out
+    }
+
+    /// `chiaki_rudp_message_parse` (inkl. Sub-Message-Kette, remote_counter
+    /// = data[0..2] + 1).
+    fn t_parse(buf: &[u8]) -> TMsg {
+        assert!(buf.len() >= 8, "RUDP-Header < 8 Bytes");
+        let size = u16::from_be_bytes([buf[0], buf[1]]);
+        let type_ = u16::from_be_bytes([buf[6], buf[7]]);
+        let subtype = buf[6];
+        let length = (size & 0x0FFF) as usize;
+        let mut remote_counter = 0;
+        let mut data = Vec::new();
+        let mut remaining = buf.len() as i64 - 8;
+        if length > 8 {
+            let data_size = (length - 8).min(remaining.max(0) as usize);
+            data = buf[8..8 + data_size].to_vec();
+            if data_size >= 2 {
+                remote_counter = u16::from_be_bytes([data[0], data[1]]).wrapping_add(1);
+            }
+            remaining -= data_size as i64;
+        }
+        let mut sub = None;
+        if remaining >= 8 {
+            let off = 8 + data.len();
+            sub = Some(Box::new(t_parse(&buf[off..])));
+        }
+        TMsg {
+            subtype,
+            type_,
+            data,
+            sub,
+            remote_counter,
+        }
+    }
+
+    fn to_ctrl_msg(msg: TMsg) -> crate::session::CtrlRudpMessage {
+        crate::session::CtrlRudpMessage {
+            subtype: msg.subtype,
+            type_: msg.type_,
+            remote_counter: msg.remote_counter,
+            data: msg.data,
+            sub_message: msg.sub.map(|s| Box::new(to_ctrl_msg(*s))),
+        }
+    }
+
+    /// Client-Seite des RUDP-Transports für den Test — spiegelt die
+    /// Produktions-Impl aus chiaki-remote (regist_psn.rs-Trait-Impl) über ein
+    /// verbundenes UDP-Socket.
+    struct TestRudp {
+        sock: UdpSocket,
+        counter: Mutex<u16>,
+        header: u32,
+        /// rudp_ack_packet-Aufrufe (Send-Buffer-ACKs) für Assertions.
+        acked: Mutex<Vec<u16>>,
+        /// Empfangs-Poll-Intervall (damit ctrl.stop() greift).
+        recv_timeout: Duration,
+    }
+
+    impl TestRudp {
+        /// Vermascht ein bereits gebundenes Socket mit der Gegenstelle
+        /// (loopback_pair-Muster aus regist_psn.rs: beide Seiten verbinden
+        /// sich gegenseitig).
+        fn wrap(sock: UdpSocket, peer: SocketAddr) -> ChiakiResult<Self> {
+            sock.connect(peer).unwrap();
+            Ok(TestRudp {
+                sock,
+                counter: Mutex::new(0x0300),
+                header: 0x1122_3344,
+                acked: Mutex::new(Vec::new()),
+                recv_timeout: Duration::from_millis(150),
+            })
+        }
+
+        fn next_counter(&self) -> u16 {
+            let mut c = self.counter.lock().unwrap();
+            let v = *c;
+            *c = c.wrapping_add(1);
+            v
+        }
+
+        fn local_counter(&self) -> u16 {
+            *self.counter.lock().unwrap()
+        }
+
+        fn send_msg(&self, msg: &TMsg) -> ChiakiResult<()> {
+            self.sock
+                .send(&t_serialize(msg))
+                .map(|_| ())
+                .map_err(|_| ChiakiError::Network)
+        }
+
+        fn recv_msg(&self, buf_size: usize) -> ChiakiResult<TMsg> {
+            let mut buf = vec![0u8; buf_size];
+            self.sock.set_read_timeout(Some(self.recv_timeout)).unwrap();
+            let n = self.sock.recv(&mut buf).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut
+                {
+                    ChiakiError::Timeout
+                } else {
+                    ChiakiError::Network
+                }
+            })?;
+            if n <= 8 {
+                return Err(ChiakiError::Network);
+            }
+            Ok(t_parse(&buf[..n]))
+        }
+
+        /// INIT/COOKIE-Handshake (ctrl.c:1165-1187).
+        fn start_session(&self) -> ChiakiResult<u16> {
+            let init_data = self.init_cookie_data(&[]);
+            self.send_msg(&rudp_frame(T_INIT_REQUEST, init_data))?;
+            let resp = self.recv_msg(1500)?;
+            assert_eq!(resp.subtype, 0xD0, "INIT_RESPONSE erwartet");
+            // C: init_response = message.data[8..] (ctrl.c:1175-1177).
+            let init_response = resp.data[8..].to_vec();
+            let cookie_data = self.init_cookie_data(&init_response);
+            self.send_msg(&rudp_frame(T_COOKIE_REQUEST, cookie_data))?;
+            let resp = self.recv_msg(1500)?;
+            assert_eq!(resp.subtype, 0xA0, "COOKIE_RESPONSE erwartet");
+            Ok(resp.remote_counter)
+        }
+
+        fn init_cookie_data(&self, tail: &[u8]) -> Vec<u8> {
+            let mut data = Vec::with_capacity(14 + tail.len());
+            data.extend_from_slice(&self.next_counter().to_be_bytes());
+            // after_counter
+            data.extend_from_slice(&[0x0B, 0x01, 0x01, 0x00, 0x01, 0x00]);
+            data.extend_from_slice(&self.header.to_be_bytes());
+            // after_header
+            data.extend_from_slice(&[0x05, 0x82]);
+            data.extend_from_slice(tail);
+            data
+        }
+
+        /// `chiaki_send_recv_http_header_psn`: Request als SESSION_MESSAGE
+        /// senden, Antwort-CTRL-Message erwarten; liefert (Data, remote_counter).
+        fn send_recv_http(&self, request: &[u8], remote_counter: u16) -> ChiakiResult<(Vec<u8>, u16)> {
+            let local = self.next_counter();
+            let sub = rudp_frame(T_CTRL_MESSAGE, {
+                let mut d = local.to_be_bytes().to_vec();
+                d.extend_from_slice(request);
+                d
+            });
+            let mut data = Vec::with_capacity(4);
+            data.extend_from_slice(&local.to_be_bytes());
+            data.extend_from_slice(&remote_counter.to_be_bytes());
+            let mut msg = rudp_frame(T_SESSION_MESSAGE, data);
+            msg.sub = Some(Box::new(sub));
+            self.send_msg(&msg)?;
+
+            let mut resp = self.recv_msg(1500)?;
+            // assign_submessage_to_message-Schleife (erwartet CTRL-Message).
+            loop {
+                if (resp.subtype & 0x0F) == 0x2 || (resp.subtype & 0x0F) == 0x6 {
+                    break;
+                }
+                match resp.sub.take() {
+                    Some(s) => resp = *s,
+                    None => return Err(ChiakiError::InvalidResponse),
+                }
+            }
+            Ok((resp.data[2..].to_vec(), resp.remote_counter))
+        }
+
+        /// Header-Ende-Scan wie `send_recv_http_header_psn` (http.c).
+        fn scan_header_end(data: &[u8]) -> usize {
+            const TRANSITIONS_R: [usize; 4] = [1, 1, 3, 1];
+            const TRANSITIONS_N: [usize; 4] = [0, 2, 0, 4];
+            let mut nl_state = 0usize;
+            for (i, &b) in data.iter().enumerate() {
+                nl_state = match b {
+                    b'\r' => TRANSITIONS_R[nl_state],
+                    b'\n' => TRANSITIONS_N[nl_state],
+                    _ => 0,
+                };
+                if nl_state == 4 {
+                    return i + 1;
+                }
+            }
+            0
+        }
+    }
+
+    impl HolepunchSession for TestRudp {
+        fn sock(&self, _port_type: crate::session::HolepunchPortType) -> Option<UdpSocket> {
+            None
+        }
+        fn create_offer(&self, _port_type: crate::session::HolepunchPortType) -> ChiakiResult<()> {
+            Ok(())
+        }
+        fn punch_hole(&self, _port_type: crate::session::HolepunchPortType) -> ChiakiResult<()> {
+            Ok(())
+        }
+        fn ps_selected_addr(&self) -> String {
+            TEST_PS_SELECTED_ADDR.to_string()
+        }
+        fn ps_ctrl_port(&self) -> u16 {
+            TEST_PS_CTRL_PORT
+        }
+        fn regist_info(&self) -> ChiakiResult<crate::session::HolepunchRegistInfo> {
+            Ok(crate::session::HolepunchRegistInfo::default())
+        }
+        fn regist(
+            &self,
+            _info: &crate::session::HolepunchRegistInfo,
+            _target: Target,
+            _psn_account_id: &[u8; crate::regist::PSN_ACCOUNT_ID_SIZE],
+            _stop: &StopPipe,
+        ) -> ChiakiResult<crate::regist::RegisteredHost> {
+            Err(ChiakiError::Unknown)
+        }
+        fn rudp_start_session(&self) -> ChiakiResult<u16> {
+            Err(ChiakiError::Unknown)
+        }
+        fn rudp_send_recv_http_header(
+            &self,
+            request: &[u8],
+            remote_counter: u16,
+            buf: &mut [u8],
+        ) -> ChiakiResult<(usize, usize, u16)> {
+            let (data, remote_counter) = self.send_recv_http(request, remote_counter)?;
+            if data.len() > buf.len() {
+                return Err(ChiakiError::BufTooSmall);
+            }
+            buf[..data.len()].copy_from_slice(&data);
+            Ok((Self::scan_header_end(&data), data.len(), remote_counter))
+        }
+        fn rudp_finish(&self, _remote_counter: u16) -> ChiakiResult<()> {
+            Err(ChiakiError::Unknown)
+        }
+        fn rudp_send_switch_to_stream_connection(&self) -> ChiakiResult<()> {
+            Err(ChiakiError::Unknown)
+        }
+        fn rudp_ctrl_start_session(&self) -> ChiakiResult<u16> {
+            self.start_session()
+        }
+        fn rudp_send_ctrl_message(&self, message: &[u8]) -> ChiakiResult<()> {
+            let mut data = self.next_counter().to_be_bytes().to_vec();
+            data.extend_from_slice(message);
+            self.send_msg(&rudp_frame(T_CTRL_MESSAGE, data))
+        }
+        fn rudp_recv_only(&self, buf_size: usize) -> ChiakiResult<crate::session::CtrlRudpMessage> {
+            Ok(to_ctrl_msg(self.recv_msg(buf_size)?))
+        }
+        fn rudp_ack_packet(&self, counter_to_ack: u16) -> ChiakiResult<()> {
+            self.acked.lock().unwrap().push(counter_to_ack);
+            Ok(())
+        }
+        fn rudp_send_ack_message(&self, remote_counter: u16) -> ChiakiResult<()> {
+            // C: lokaler Counter wird nicht erhöht, dann remote_counter,
+            // dann {0x00, 0x92}.
+            let mut data = Vec::with_capacity(6);
+            data.extend_from_slice(&self.local_counter().to_be_bytes());
+            data.extend_from_slice(&remote_counter.to_be_bytes());
+            data.extend_from_slice(&[0x00, 0x92]);
+            self.send_msg(&rudp_frame(T_ACK, data))
+        }
+        fn rudp_print_message(&self, _message: &crate::session::CtrlRudpMessage) {}
+    }
+
+    /// "Konsole": RUDP-Gegenseite des Loopbacks (INIT/COOKIE, HTTP über die
+    /// SESSION_MESSAGE, Ctrl-Messages mit RPCrypt-Ver-/Entschlüsselung).
+    struct ConsolePeer {
+        sock: UdpSocket,
+        counter: u16,
+        rpcrypt: Rpcrypt,
+        last_counter: u16,
+    }
+
+    impl ConsolePeer {
+        fn new(sock: UdpSocket, rpcrypt: Rpcrypt) -> Self {
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            ConsolePeer {
+                sock,
+                counter: 0x1000,
+                rpcrypt,
+                last_counter: 0,
+            }
+        }
+
+        /// 2-Byte-Counter-Präfix für Message-Data (zählt hoch).
+        fn counter_prefix(&mut self) -> Vec<u8> {
+            self.last_counter = self.counter;
+            self.counter = self.counter.wrapping_add(1);
+            self.last_counter.to_be_bytes().to_vec()
+        }
+
+        fn send(&self, msg: &TMsg) {
+            self.sock.send(&t_serialize(msg)).unwrap();
+        }
+
+        fn recv(&self) -> TMsg {
+            let mut buf = [0u8; 1500];
+            let n = self.sock.recv(&mut buf).unwrap();
+            t_parse(&buf[..n])
+        }
+
+        /// Empfängt eine RUDP-CTRL-Message und liefert den Ctrl-Frame
+        /// (8-Byte-Header + Payload, ohne die 2 Counter-Bytes).
+        fn recv_ctrl_frame(&self) -> Vec<u8> {
+            let msg = self.recv();
+            assert_eq!(msg.subtype, 0x02, "RUDP-CTRL-Message erwartet");
+            msg.data[2..].to_vec()
+        }
+
+        /// Sendet einen Ctrl-Frame als RUDP-CTRL-Message.
+        fn send_ctrl_frame(&mut self, frame: &[u8]) {
+            let mut data = self.counter_prefix();
+            data.extend_from_slice(frame);
+            self.send(&rudp_frame(T_CTRL_MESSAGE, data));
+        }
+
+        /// Empfängt einen Ctrl-Frame und prüft Type + (mit `crypt_counter`
+        /// entschlüsselten) Payload — `None` = leerer Payload.
+        fn expect_ctrl(&self, msg_type: u16, crypt_counter: Option<u64>, plain: &[u8]) {
+            let frame = self.recv_ctrl_frame();
+            let size = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
+            let rtype = u16::from_be_bytes([frame[4], frame[5]]);
+            assert_eq!(rtype, msg_type, "Ctrl-Message-Type");
+            assert_eq!(size, plain.len(), "Payload-Größe von Type {msg_type:#x}");
+            match crypt_counter {
+                Some(c) => {
+                    let mut buf = frame[8..].to_vec();
+                    self.rpcrypt.decrypt(c, &mut buf).unwrap();
+                    assert_eq!(&buf, plain, "Payload von Type {msg_type:#x}");
+                }
+                None => assert!(frame[8..].is_empty()),
+            }
+        }
+
+        /// Empfängt eine ACK-Message und prüft data[2..4] == expected_remote.
+        fn expect_ack(&self, expected_remote: u16) {
+            let ack = self.recv();
+            assert_eq!(ack.type_, T_ACK, "ACK-Message erwartet");
+            assert_eq!(
+                &ack.data[2..4],
+                &expected_remote.to_be_bytes(),
+                "ACK-Remote-Counter"
+            );
+        }
+    }
+
+    /// Konsolen-Vorspann: INIT/COOKIE-Handshake + HTTP-Request prüfen +
+    /// Antwort (mit optionalem Leftover-Frame hinter dem Header) + ACK
+    /// erwarten (ctrl.c:1165-1187, 1329-1398).
+    fn console_handshake_head(peer: &mut ConsolePeer, response: &str, leftover: &[u8]) {
+        // (1) INIT_REQUEST -> INIT_RESPONSE (data[8..] = "Cookie").
+        let init = peer.recv();
+        assert_eq!(init.subtype, 0x80, "INIT_REQUEST erwartet");
+        let cookie = b"COOKIE123";
+        let mut resp_data = peer.counter_prefix();
+        resp_data.extend_from_slice(&[0u8; 6]);
+        resp_data.extend_from_slice(cookie);
+        peer.send(&rudp_frame(T_INIT_RESPONSE, resp_data));
+
+        // (2) COOKIE_REQUEST (trägt die Cookie-Antwort in data[14..]).
+        let cookie_req = peer.recv();
+        assert_eq!(cookie_req.subtype, 0x90, "COOKIE_REQUEST erwartet");
+        assert_eq!(
+            &cookie_req.data[14..],
+            cookie,
+            "init_response muss im Cookie-Request wiederkehren"
+        );
+        let resp_data = peer.counter_prefix();
+        peer.send(&rudp_frame(T_COOKIE_RESPONSE, resp_data));
+
+        // (3) HTTP-Request über die SESSION_MESSAGE prüfen (Port aus
+        //     ps_ctrl_port, ctrl.c:1299).
+        let sess = peer.recv();
+        assert_eq!(sess.type_, T_SESSION_MESSAGE, "SESSION_MESSAGE erwartet");
+        let sub = sess.sub.expect("Sub-Message (CTRL)");
+        assert_eq!(sub.type_, T_CTRL_MESSAGE);
+        let request = String::from_utf8(sub.data[2..].to_vec()).unwrap();
+        assert!(
+            request.starts_with("GET /sie/ps4/rp/sess/ctrl HTTP/1.1\r\n"),
+            "request: {request}"
+        );
+        assert!(
+            request.contains(&format!(
+                "Host: {TEST_PS_SELECTED_ADDR}:{TEST_PS_CTRL_PORT}\r\n"
+            )),
+            "ps_selected_addr:ps_ctrl_port als Host erwartet: {request}"
+        );
+        assert!(request.contains("User-Agent: remoteplay Windows\r\n"));
+        assert!(request.contains("Connection: keep-alive\r\n"));
+        assert!(request.contains("Content-Length: 0\r\n"));
+        assert!(request.contains("RP-Auth: "));
+        assert!(request.contains("RP-Version: 10.0\r\n"));
+        assert!(request.contains("RP-Did: "));
+        assert!(request.contains("RP-ControllerType: 3\r\n"));
+        assert!(request.contains("RP-ClientType: 11\r\n"));
+        assert!(request.contains("RP-OSType: "));
+        assert!(request.contains("RP-ConPath: 1\r\n"));
+        // target >= PS4_10 -> StartBitrate, kein StreamingType (kein PS5).
+        assert!(request.contains("RP-StartBitrate: "));
+        assert!(!request.contains("RP-StreamingType: "));
+
+        // (4) Antwort: HTTP-Header (+ Leftover — prüft den
+        //     "mehr Data als Header"-Pfad, ctrl.c:1469-1472).
+        let mut resp_bytes = response.as_bytes().to_vec();
+        resp_bytes.extend_from_slice(leftover);
+        let mut data = peer.counter_prefix();
+        let c_http_resp = peer.last_counter;
+        data.extend_from_slice(&resp_bytes);
+        peer.send(&rudp_frame(T_CTRL_MESSAGE, data));
+
+        // (5) ACK auf die HTTP-Antwort (ctrl.c:1389-1398): remote_counter
+        //     = Counter der Antwort + 1.
+        peer.expect_ack(c_http_resp.wrapping_add(1));
+    }
+
+    /// RUDP-Loopback über den vollen Flow: Handshake, HTTP (mit RP-Server-
+    /// Type), Session-Id als HTTP-Leftover, Heartbeat, 0x12-Send-Buffer-ACK
+    /// mit Ctrl-Frame hinter Offset 8, Enable-Features, Session-Kommandos,
+    /// Switch-to-Stream-Connection.
+    #[test]
+    fn ctrl_rudp_loopback_full_flow() {
+        let nonce = k16("ae92e764882651ef89018cfa696c6938");
+        let morning = k16("74a59c9693c2083ba6a84ba050fa8e5a");
+
+        let (sock_a, sock_b) = rudp_loopback_pair();
+        let sock_b_addr = sock_b.local_addr().unwrap();
+
+        // Session-Id-Frame für den HTTP-Leftover (remote counter 1 —
+        // counter 0 geht an RP-Server-Type).
+        let rpcrypt_for_server = Rpcrypt::new_auth(Target::Ps4_10, &nonce, &morning).unwrap();
+        let session_id = b"chiakiSessionIdTest00000000abc";
+        let mut sid_plain = vec![session_id.len() as u8];
+        sid_plain.extend_from_slice(session_id);
+        let sid_enc = rpcrypt_for_server.encrypt_buf(1, &sid_plain).unwrap();
+        let mut sid_frame = build_header(sid_enc.len(), CtrlMessageType::SessionId as u16).to_vec();
+        sid_frame.extend_from_slice(&sid_enc);
+
+        let mut server_type_plain = [0u8; 16];
+        server_type_plain[0] = 2;
+        let server_type_enc = rpcrypt_for_server.encrypt_buf(0, &server_type_plain).unwrap();
+        let response =
+            format!("HTTP/1.1 200 OK\r\nRP-Server-Type: {}\r\n\r\n", base64::encode(&server_type_enc));
+
+        let console = std::thread::spawn(move || {
+            let mut peer = ConsolePeer::new(sock_b, rpcrypt_for_server);
+            console_handshake_head(&mut peer, &response, &sid_frame);
+
+            // Enable-Features nach der Session-Id (lokale Counter 4-6:
+            // 0-3 gehen an auth/did/ostype/bitrate).
+            peer.expect_ctrl(CtrlMessageType::MicToggle as u16, Some(4), &[0, 1, 1, 89]);
+            peer.expect_ctrl(CtrlMessageType::MicToggle as u16, Some(5), &[0, 1, 1, 89]);
+            peer.expect_ctrl(CtrlMessageType::DisplayDevices as u16, Some(6), &[0, 0, 0, 0]);
+
+            // Session-Kommandos (Queue des Ctrl-Threads).
+            peer.expect_ctrl(CtrlMessageType::GotoBed as u16, None, &[]);
+            peer.expect_ctrl(
+                CtrlMessageType::GoHome as u16,
+                Some(7),
+                &[0x00, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            );
+            peer.expect_ctrl(CtrlMessageType::MicToggle as u16, Some(8), &[0, 1, 0, 89]);
+            peer.expect_ctrl(CtrlMessageType::MicConnect as u16, Some(9), &[0, 0]);
+            peer.expect_ctrl(CtrlMessageType::KeyboardCloseReq as u16, Some(10), &[0, 0, 0, 0]);
+
+            // Heartbeat: REQ schicken — der 0x02-Handler des Clients bestätigt
+            // die Message per ACK (ctrl.c:544-545), dann die Golden-REP
+            // erwarten.
+            peer.send_ctrl_frame(&build_header(0, CtrlMessageType::HeartbeatReq as u16));
+            let c_heartbeat = peer.last_counter;
+            peer.expect_ack(c_heartbeat.wrapping_add(1));
+            let frame = peer.recv_ctrl_frame();
+            assert_eq!(
+                frame,
+                build_header(0, CtrlMessageType::HeartbeatRep as u16),
+                "Heartbeat-Rep-Frame"
+            );
+
+            // 0x12-Message: Send-Buffer-ACK (0x4321) + Ctrl-Frame hinter
+            // Offset 8 (Type 0x99, leer — löst keinen Event aus). Der
+            // Handler antwortet mit einer ACK-Message (ctrl.c:539-557).
+            const OFFSET8_ACK: u16 = 0x4321;
+            let mut data = peer.counter_prefix();
+            let c12 = peer.last_counter;
+            data.extend_from_slice(&OFFSET8_ACK.to_be_bytes());
+            data.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // Füller bis offset 8
+            data.extend_from_slice(&build_header(0, 0x99));
+            peer.send(&rudp_frame(T_OFFSET8, data));
+            peer.expect_ack(c12.wrapping_add(1));
+
+            // Switch-to-Stream-Connection-ACK.
+            peer.send_ctrl_frame(&build_header(0, CtrlMessageType::SwitchToStreamConnection as u16));
+
+            // Socket offen halten, bis der Test gestoppt hat (länger als der
+            // Empfangs-Poll des Ctrl-Loops, damit der Stop sauber greift).
+            std::thread::sleep(Duration::from_millis(400));
+        });
+
+        // --- Ctrl mit Holepunch-Transport aufsetzen ---
+        let test_rudp = Arc::new(TestRudp::wrap(sock_a, sock_b_addr).unwrap());
+        let (event_tx, event_rx) = mpsc::channel();
+        let (msg_queue_tx, msg_queue_rx) = mpsc::channel();
+        let mut ctrl = Ctrl::new(CtrlInit {
+            rpcrypt: Rpcrypt::new_auth(Target::Ps4_10, &nonce, &morning).unwrap(),
+            target: Target::Ps4_10,
+            regist_key: *b"regist_key_regs\0",
+            did: [0x42; RP_DID_SIZE],
+            hostname: TEST_PS_SELECTED_ADDR.to_string(),
+            // Im RUDP-Pfad ungenutzt (C: Port/Adresse aus der Holepunch-Session).
+            host_addr: "127.0.0.1:0".parse().unwrap(),
+            sock: None,
+            transport: CtrlTransport::Holepunch(test_rudp.clone()),
+            codec: Codec::H264,
+            enable_dualsense: false,
+            enable_keyboard: false,
+            msg_queue_tx,
+            msg_queue_rx,
+            event_cb: Arc::new(move |ev| {
+                let _ = event_tx.send(ev);
+            }),
+        })
+        .unwrap();
+        ctrl.start().unwrap();
+
+        // ServerType aus dem HTTP-Handshake (remote counter 0).
+        match event_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            CtrlEvent::ServerType { server_type } => assert_eq!(server_type, 2),
+            other => panic!("expected ServerType, got {other:?}"),
+        }
+        // Session-Id aus dem HTTP-Leftover-Frame.
+        match event_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            CtrlEvent::SessionId(id) => {
+                assert_eq!(id, "chiakiSessionIdTest00000000abc");
+                assert!(ctrl.session_id_received());
+            }
+            other => panic!("expected SessionId, got {other:?}"),
+        }
+
+        // Session-Kommandos (die Konsole prüft die Frames oben).
+        ctrl.goto_bed().unwrap();
+        ctrl.go_home().unwrap();
+        ctrl.toggle_microphone(true).unwrap();
+        ctrl.connect_microphone().unwrap();
+        ctrl.keyboard_accept().unwrap();
+
+        // Switch-to-Stream-Connection-ACK.
+        match event_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            CtrlEvent::SwitchToStreamConnection => {}
+            other => panic!("expected SwitchToStreamConnection, got {other:?}"),
+        }
+
+        // Send-Buffer-ACK aus der 0x12-Message ist bei der Holepunch-Session
+        // angekommen (ctrl.c:543).
+        assert_eq!(test_rudp.acked.lock().unwrap().as_slice(), &[0x4321][..]);
+
+        // Sauber herunterfahren — danach darf kein Quit kommen.
+        ctrl.stop();
+        ctrl.join().unwrap();
+        console.join().unwrap();
+        match event_rx.recv_timeout(Duration::from_millis(200)) {
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {}
+            other => panic!("unexpected event after clean shutdown: {other:?}"),
+        }
+    }
+
+    /// Vermaschtes UDP-Loopback-Paar (Muster `loopback_pair` aus den
+    /// regist_psn.rs-Tests): beide Sockets sind aufeinander verbunden.
+    fn rudp_loopback_pair() -> (UdpSocket, UdpSocket) {
+        let a = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").unwrap();
+        a.connect(b.local_addr().unwrap()).unwrap();
+        b.connect(a.local_addr().unwrap()).unwrap();
+        (a, b)
+    }
+
+    /// RUDP-Finish-Message (Subtype 0xC0, ctrl.c:562-565): ctrl_failed, aber
+    /// der Ctrl-Loop läuft weiter bis zur Stop-Anforderung.
+    #[test]
+    fn ctrl_rudp_finish_message_reports_quit() {
+        run_rudp_error_case(|peer| {
+            // FINISH-Message nach dem Handshake — Data >= 4 Bytes (sonst
+            // greift der "too small"-Zweig vor dem Subtype-Switch).
+            let mut data = peer.counter_prefix();
+            data.extend_from_slice(&[0x00, 0x00]);
+            peer.send(&rudp_frame(T_FINISH, data));
+        });
+    }
+
+    /// Zu kleine RUDP-Response (data < 4 Bytes, ctrl.c:527-533): ctrl_failed.
+    #[test]
+    fn ctrl_rudp_too_small_message_reports_quit() {
+        run_rudp_error_case(|peer| {
+            let mut data = peer.counter_prefix();
+            data.push(0x00); // nur 3 Bytes Data < 4
+            peer.send(&rudp_frame(T_CTRL_MESSAGE, data));
+        });
+    }
+
+    /// Gemeinsamer Fahrer der Fehlerpfad-Tests: Handshake/HTTP gegen die
+    /// Konsole (ohne RP-Server-Type), dann die jeweilige Fehler-Message
+    /// senden und auf Quit(Unknown) warten.
+    fn run_rudp_error_case(send_error: impl FnOnce(&mut ConsolePeer) + Send + 'static) {
+        let nonce = k16("ae92e764882651ef89018cfa696c6938");
+        let morning = k16("74a59c9693c2083ba6a84ba050fa8e5a");
+        let (sock_a, sock_b) = rudp_loopback_pair();
+        let sock_b_addr = sock_b.local_addr().unwrap();
+        let rpcrypt_for_server = Rpcrypt::new_auth(Target::Ps4_10, &nonce, &morning).unwrap();
+
+        let console = std::thread::spawn(move || {
+            let mut peer = ConsolePeer::new(sock_b, rpcrypt_for_server);
+            console_handshake_head(&mut peer, "HTTP/1.1 200 OK\r\n\r\n", &[]);
+            send_error(&mut peer);
+            std::thread::sleep(Duration::from_millis(400));
+        });
+
+        let test_rudp = Arc::new(TestRudp::wrap(sock_a, sock_b_addr).unwrap());
+        let (event_tx, event_rx) = mpsc::channel();
+        let (msg_queue_tx, msg_queue_rx) = mpsc::channel();
+        let mut ctrl = Ctrl::new(CtrlInit {
+            rpcrypt: Rpcrypt::new_auth(Target::Ps4_10, &nonce, &morning).unwrap(),
+            target: Target::Ps4_10,
+            regist_key: [0u8; RPCRYPT_KEY_SIZE],
+            did: [0u8; RP_DID_SIZE],
+            hostname: TEST_PS_SELECTED_ADDR.to_string(),
+            host_addr: "127.0.0.1:0".parse().unwrap(),
+            sock: None,
+            transport: CtrlTransport::Holepunch(test_rudp),
+            codec: Codec::H264,
+            enable_dualsense: false,
+            enable_keyboard: false,
+            msg_queue_tx,
+            msg_queue_rx,
+            event_cb: Arc::new(move |ev| {
+                let _ = event_tx.send(ev);
+            }),
+        })
+        .unwrap();
+        ctrl.start().unwrap();
+
+        // Einziger Event: Quit(Unknown) aus dem RUDP-Fehlerpfad.
+        let mut last = None;
+        while let Ok(ev) = event_rx.recv_timeout(Duration::from_secs(5)) {
+            last = Some(ev);
+            if matches!(last, Some(CtrlEvent::Quit(CtrlQuitReason::Unknown))) {
+                break;
+            }
+        }
+        assert!(
+            matches!(last, Some(CtrlEvent::Quit(CtrlQuitReason::Unknown))),
+            "expected Quit(Unknown), got {last:?}"
+        );
+
+        // Der Loop läuft nach ctrl_failed weiter (wie im C) — Stop beendet ihn.
+        ctrl.stop();
+        ctrl.join().unwrap();
+        console.join().unwrap();
+    }
+
+    /// `rudp_packet_type_data_offset()` (ctrl.c:103-114).
+    #[test]
+    fn rudp_packet_type_data_offset_golden() {
+        assert_eq!(rudp_packet_type_data_offset(0x12), 8);
+        assert_eq!(rudp_packet_type_data_offset(0x26), 6);
+        assert_eq!(rudp_packet_type_data_offset(0x02), 2);
+        assert_eq!(rudp_packet_type_data_offset(0x36), 2);
+        assert_eq!(rudp_packet_type_data_offset(0xC0), 2);
+        assert_eq!(rudp_packet_type_data_offset(0x00), 2);
     }
 }
 

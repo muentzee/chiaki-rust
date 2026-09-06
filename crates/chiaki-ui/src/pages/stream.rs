@@ -1,130 +1,373 @@
-//! Stream (ui-v2-spec §2.4): Connecting-Sequence (4 Status-Stationen) +
-//! Video-Fläche (VideoPresenter-Pfad) + HUD-Gerüst. GERÜST — der Stream-
-//! Agent füllt Decode-Pipeline (chiaki_media::Decoder → NV12 → optional VSR)
-//! und HUD-Stats aus.
+//! Stream (ui-v2-spec §2.4): die Stream-Ansicht — Video volles Fenster
+//! (VideoPresenter-Pfad aus Spike S1), Connecting-Sequence mit 4 Stationen,
+//! Stats-HUD, Einblend-Panel (H), PIN-/Tastatur-Overlays und die volle
+//! Session-Verkabelung über [`state::StreamUiState`].
+//!
+//! Modulstruktur (Task „Modulstruktur frei, dokumentieren"):
+//! * [`state`]  — gpui-Global: Flow, Input-Loop, Stats, Aktionen.
+//! * [`connecting`] — Connecting-Sequence-Overlay (4 Stationen + Abbrechen).
+//! * [`hud`]    — Stats-Badges, VSR-Badge, Einblend-Panel.
+//! * [`dialogs`] — PIN-/Tastatur-Overlay + Trennen-Confirm.
+//! * [`fake`]   — FAKE-Mode (`CHIAKI_UI_FAKE_STREAM=1[|pin]`): NV12-
+//!   Testpattern + Fake-Telemetrie ohne Konsole.
+//!
+//! Der Videopfad ist der verifizierte Spike-S1-Weg: `presenter.take_image
+//! (window)` pro Frame (GPUI-Thread) + `window.request_animation_frame()` +
+//! `cx.notify()` treiben den Loop; `VideoSurface` malt das Bild
+//! aspektgetreu (Fit/Zoom/Stretch wie die C++ window_type-Zweige).
 
-use gpui::{div, px, Context, IntoElement, ParentElement as _, Styled, Window};
+pub(crate) mod connecting;
+pub(crate) mod dialogs;
+pub(crate) mod fake;
+pub(crate) mod hud;
+pub mod state;
 
+pub use state::shutdown;
+pub(crate) use state::{forward_psn_connect_state, forward_session_event, maybe_open_disconnect_dialog};
+
+use std::sync::Arc;
+
+use gpui::{
+    div, px, App, Bounds, Corners, Context, Element, ElementId, GlobalElementId,
+    InspectorElementId, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, LayoutId,
+    ParentElement as _, Pixels, Point, RenderImage, Size, StatefulInteractiveElement as _, Style,
+    Styled, Window,
+};
+
+use crate::app::{AppShell, Route};
 use crate::backend::HostId;
-use crate::app::AppShell;
-use crate::components::{Button, ButtonVariant, Card, GlassPanel, StatusBadge, StatusKind};
-use crate::pages::page_scaffold;
 use crate::theme;
 
-/// Die 4 Status-Stationen der Connecting-Sequence (bindend, Spec §2.4).
-pub const CONNECTING_STATIONS: [&str; 4] =
-    ["Aufwecken", "Anmelden", "Verbindung kalibrieren", "Streamen"];
+use state::{Stage, StreamUiState, ZoomMode};
 
+/// Seiten-Einstieg (bindende Signatur, CONTRACT-UI §5).
 pub fn page(
     shell: &mut AppShell,
     host: HostId,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
-    let session = shell.backend.sessions().active();
+    // Video-/Input-Loop: gpui-dokumentierter Pfad für kontinuierliches
+    // Repainting (spike-s1-results.md „API-Annahmen").
+    window.request_animation_frame();
 
-    let mut children: Vec<gpui::AnyElement> = Vec::new();
+    let _created = state::ensure_and_tick(shell, host.clone(), window, cx);
+    cx.notify(); // Loop am Laufen halten (Repaint → RAF → Render …)
 
-    // Stationsanzeige.
-    children.push(
-        div()
-            .flex()
-            .flex_row()
-            .gap_2()
-            .children(CONNECTING_STATIONS.iter().enumerate().map(|(i, station)| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px(px(theme::SP_3))
-                    .py(px(theme::SP_2))
-                    .rounded(px(theme::RADIUS_SM))
-                    .bg(theme::SURFACE)
-                    .border_1()
-                    .border_color(theme::HAIRLINE)
-                    .child(
-                        div()
-                            .size(px(8.0))
-                            .rounded_full()
-                            .bg(if i == 0 { theme::ACCENT } else { theme::TEXT_DISABLED }),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(theme::SIZE_BODY))
-                            .text_color(theme::TEXT_PRIMARY)
-                            .child(station.to_string()),
-                    )
-            }))
+    // State-Daten holen (kurze Borrows; danach folgt der Elementbau mit
+    // cx.listener, das &mut cx braucht).
+    let (presenter, snap, keyboard_focus, focus) = {
+        let state = cx.global::<StreamUiState>();
+        (
+            state.presenter.clone(),
+            state.snapshot(),
+            state.keyboard.as_ref().map(|k| k.focus.clone()),
+            state.focus.clone(),
+        )
+    };
+    let image = presenter.as_ref().and_then(|p| p.take_image(window));
+
+    // -- Handler (jeweils kurz &mut cx) -------------------------------------
+
+    let on_cancel = cx.listener(|shell, _ev, _window, cx| {
+        if cx.has_global::<StreamUiState>() {
+            cx.global_mut::<StreamUiState>().disconnect_now();
+        }
+        shell.navigate(Route::Home, cx);
+    });
+    let on_options = cx.listener(|_shell, _ev, _window, cx| {
+        if cx.has_global::<StreamUiState>() {
+            cx.global_mut::<StreamUiState>().toggle_panel();
+        }
+    });
+    let on_disconnect = cx.listener(|_shell, _ev, _window, cx| {
+        dialogs::push_disconnect_confirm(cx);
+    });
+    let on_goto_bed = cx.listener(|_shell, _ev, _window, cx| {
+        if cx.has_global::<StreamUiState>() {
+            cx.global_mut::<StreamUiState>().goto_bed();
+        }
+    });
+    let on_mic = cx.listener(|_shell, _ev, _window, cx| {
+        if cx.has_global::<StreamUiState>() {
+            cx.global_mut::<StreamUiState>().toggle_mic();
+        }
+    });
+    let on_zoom = cx.listener(|_shell, _ev, _window, cx| {
+        if cx.has_global::<StreamUiState>() {
+            cx.global_mut::<StreamUiState>().cycle_zoom();
+        }
+    });
+    let on_video_click = cx.listener(|_shell, ev: &gpui::ClickEvent, window, _cx| {
+        // Doppelklick = Vollbild-Toggle (wie F11, C++-Verhalten).
+        if ev.click_count() >= 2 {
+            window.toggle_fullscreen();
+        }
+    });
+    let on_keyboard_send = cx.listener(|_shell, _ev, window, cx| {
+        if cx.has_global::<StreamUiState>() {
+            cx.global_mut::<StreamUiState>().keyboard_accept();
+            refocus(cx, window);
+        }
+    });
+    let on_keyboard_cancel = cx.listener(|_shell, _ev, window, cx| {
+        if cx.has_global::<StreamUiState>() {
+            cx.global_mut::<StreamUiState>().keyboard_cancel();
+            refocus(cx, window);
+        }
+    });
+
+    let on_key_down = cx.listener(|_shell, ev: &KeyDownEvent, window, cx| {
+        if !cx.has_global::<StreamUiState>() {
+            return;
+        }
+        let key: &str = &ev.keystroke.key;
+        let consumed =
+            cx.global_mut::<StreamUiState>().on_key_down(key, ev.keystroke.modifiers, window);
+        let pending = cx.global::<StreamUiState>().refocus_pending;
+        if pending {
+            cx.global_mut::<StreamUiState>().refocus_pending = false;
+            refocus(cx, window);
+        }
+        if consumed {
+            cx.stop_propagation();
+        }
+    });
+    let on_key_up = cx.listener(|_shell, ev: &KeyUpEvent, _window, cx| {
+        if !cx.has_global::<StreamUiState>() {
+            return;
+        }
+        let key: &str = &ev.keystroke.key;
+        cx.global_mut::<StreamUiState>().on_key_up(key, ev.keystroke.modifiers);
+    });
+
+    // -- Elementbaum ---------------------------------------------------------
+
+    // Video-Fläche (immer da; Connecting-Overlay liegt darüber).
+    let video_area = div()
+        .id("stream-video")
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .overflow_hidden()
+        .bg(gpui::black())
+        .on_click(on_video_click)
+        .child(match image {
+            Some(image) => VideoSurface {
+                image,
+                mode: snap.zoom,
+            }
             .into_any_element(),
-    );
+            None => div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(theme::SIZE_HEADLINE))
+                        .text_color(theme::TEXT_SECONDARY)
+                        .child("Kein Video-Signal"),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::SIZE_CAPTION))
+                        .text_color(theme::TEXT_DISABLED)
+                        .child("Warte auf Frames der Session…".to_string()),
+                )
+                .into_any_element(),
+        });
 
-    // Video-Fläche (Platzhalter): Der Stream-Agent hängt hier
-    // `session.presenter.video_element(take_image(window))` an.
-    children.push(
-        div()
-            .flex_1()
-            .rounded(px(theme::RADIUS_LG))
-            .bg(theme::SURFACE)
-            .border_1()
-            .border_color(theme::HAIRLINE)
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .text_color(theme::TEXT_SECONDARY)
-                    .text_size(px(theme::SIZE_HEADLINE))
-                    .child(format!(
-                        "Video-Fläche — Host {} (Session {} aktiv: {})",
-                        host.describe(),
-                        session.as_ref().map(|s| s.id).unwrap_or(0),
-                        session.as_ref().map(|s| s.is_running()).unwrap_or(false),
-                    )),
+    // Connecting-Sequence (Vollbild-Overlay, solange nicht gestreamt wird).
+    let connecting_overlay = if snap.stage != Stage::Streaming {
+        vec![connecting::view(&snap, on_cancel).into_any_element()]
+    } else {
+        Vec::new()
+    };
+
+    // HUD/Panel (nur im Streaming).
+    let mut streaming_overlays: Vec<gpui::AnyElement> = Vec::new();
+    if snap.stage == Stage::Streaming {
+        let mut top_left = hud::live_badge(&snap);
+        if snap.hud_open {
+            top_left = div()
+                .absolute()
+                .top_4()
+                .left_4()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .max_w(px(720.0))
+                .child(top_left)
+                .child(hud::stats_row(&snap))
+                .into_any_element();
+        }
+        streaming_overlays.push(top_left);
+
+        let mut top_right: Vec<gpui::AnyElement> = Vec::new();
+        if let Some(badge) = hud::vsr_badge(&snap) {
+            top_right.push(badge);
+        }
+        top_right.push(hud::options_button(snap.panel_open, on_options));
+        streaming_overlays.push(
+            div()
+                .absolute()
+                .top_4()
+                .right_4()
+                .flex()
+                .items_center()
+                .gap_2()
+                .children(top_right)
+                .into_any_element(),
+        );
+
+        if snap.panel_open {
+            streaming_overlays.push(
+                hud::panel(
+                    &snap,
+                    hud::PanelHandlers {
+                        disconnect: Box::new(on_disconnect),
+                        goto_bed: Box::new(on_goto_bed),
+                        mic: Box::new(on_mic),
+                        zoom: Box::new(on_zoom),
+                    },
+                )
+                .into_any_element(),
+            );
+        }
+    }
+
+    // Overlays: PIN + Konsole-Tastatur.
+    let mut overlays: Vec<gpui::AnyElement> = Vec::new();
+    if snap.pin_visible {
+        overlays.push(dialogs::pin_view(&snap).into_any_element());
+    }
+    if let (true, Some(kfocus)) = (snap.keyboard_open, keyboard_focus) {
+        overlays.push(
+            dialogs::keyboard_view(
+                &snap.keyboard_text,
+                kfocus,
+                on_keyboard_send,
+                on_keyboard_cancel,
             )
             .into_any_element(),
-    );
+        );
+    }
 
-    // HUD-Gerüst (Glas-Layer mit Stat-Badges — später Taste H).
-    children.push(
-        GlassPanel::new()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(StatusBadge::new(StatusKind::Ready).label("stream"))
-                    .child(
-                        div()
-                            .text_size(px(theme::SIZE_BODY))
-                            .text_color(theme::TEXT_SECONDARY)
-                            .child("Bitrate · RTT · Loss · Frame-Time (HUD kommt)"),
-                    ),
-            )
-            .into_any_element(),
-    );
+    div()
+        .id("stream-root")
+        .size_full()
+        .relative()
+        .bg(theme::BG)
+        .text_color(theme::TEXT_PRIMARY)
+        .key_context("Stream")
+        .track_focus(&focus)
+        .on_key_down(on_key_down)
+        .on_key_up(on_key_up)
+        .child(video_area)
+        .children(connecting_overlay)
+        .children(streaming_overlays)
+        .children(overlays)
+}
 
-    children.push(
-        Card::new("stream-controls")
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        Button::new("stream-cancel", "Verbindung trennen")
-                            .variant(ButtonVariant::Danger)
-                            .on_click(cx.listener(|shell, _ev, _window, cx| {
-                                shell.backend.sessions().stop_current();
-                                shell.navigate(crate::app::Route::Home, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("stream-home", "Zurück")
-                            .on_click(cx.listener(|shell, _ev, _window, cx| {
-                                shell.navigate(crate::app::Route::Home, cx);
-                            })),
-                    ),
-            )
-            .into_any_element(),
-    );
+/// Fokus zurück auf den Stream-Root (nach Overlay-Schluss).
+fn refocus(cx: &mut Context<AppShell>, window: &mut Window) {
+    if !cx.has_global::<StreamUiState>() {
+        return;
+    }
+    let focus = cx.global::<StreamUiState>().focus.clone();
+    window.defer(cx, move |window, _cx| focus.focus(window));
+}
 
-    page_scaffold(children)
+// ---------------------------------------------------------------------------
+// VideoSurface — aspektgetreues Malen des Presenter-Bilds
+// ---------------------------------------------------------------------------
+
+/// Malt ein `RenderImage` je Skalierungsmodus: Fit (Balken), Zoom (Crop,
+/// geclippt durch `overflow_hidden` des Containers), Stretch (verzerrt
+/// füllend). Baut auf dem gemessenen `paint_image`-Pfad des Spike S1 auf.
+struct VideoSurface {
+    image: Arc<RenderImage>,
+    mode: ZoomMode,
+}
+
+impl IntoElement for VideoSurface {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for VideoSurface {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(ElementId::Name("video-surface".into()))
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = gpui::relative(1.0).into();
+        style.size.height = gpui::relative(1.0).into();
+        let layout_id = window.request_layout(style, [], cx);
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        let size = self.image.size(0);
+        let (iw, ih) = ((size.width.0 as f32).max(1.0), (size.height.0 as f32).max(1.0));
+        let (bw, bh) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let target = match self.mode {
+            ZoomMode::Stretch => bounds,
+            ZoomMode::Fit | ZoomMode::Zoom => {
+                let scale = match self.mode {
+                    ZoomMode::Fit => (bw / iw).min(bh / ih),
+                    _ => (bw / iw).max(bh / ih),
+                };
+                let (w, h) = (iw * scale, ih * scale);
+                Bounds {
+                    origin: Point {
+                        x: bounds.origin.x + px((bw - w) / 2.0),
+                        y: bounds.origin.y + px((bh - h) / 2.0),
+                    },
+                    size: Size { width: px(w), height: px(h) },
+                }
+            }
+        };
+        let _ = window.paint_image(target, Corners::default(), self.image.clone(), 0, false);
+    }
 }

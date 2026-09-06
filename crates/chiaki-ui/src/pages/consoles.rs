@@ -1,13 +1,68 @@
-//! Konsolen (ui-v2-spec §2.2): Grid aller Konsolen + Filter-Chips + Registrierungs-Wizard.
-//! GERÜST — der Konsolen-Agent füllt Grid/Chips/Kontextmenüs aus.
+//! Konsolen (ui-v2-spec §2.2): Grid aller Konsolen (Discovery + Manuell +
+//! PSN-Remote), Filter-Chips (Alle / Bereit / Offline / PSN) und der
+//! Registrierungs-Wizard als Overlay dieser Seite.
+//!
+//! Referenz: `qml2/pages/ConsolesPage.qml` — Chip-Logik auf den
+//! Host-Feldern, Klick = Verbinden, Kontextmenü identisch zur Home-Seite
+//! (geteilt über [`crate::pages::home`]).
 
-use gpui::{div, px, Context, ElementId, IntoElement, ParentElement as _, Styled, Window};
+use gpui::{
+    div, px, Context, FontWeight, IntoElement, InteractiveElement as _, ParentElement as _,
+    StatefulInteractiveElement as _, Styled, Window,
+};
+
+use chiaki_settings::hosts::{HostMac, ManualHost};
 
 use crate::app::AppShell;
-use crate::components::{Button, Card, EmptyState, SectionLabel, StatusBadge, StatusKind};
+use crate::components::{
+    Button, ButtonVariant, Card, EmptyState, SectionLabel, StatusKind, TextField, ToastData,
+    ToastKind,
+};
 use crate::icons;
+use crate::pages::home::{console_entries, console_tile, ConsoleEntry};
+use crate::pages::regist_wizard;
 use crate::pages::{page_header, page_scaffold};
 use crate::theme;
+
+/// Filter-Chips der Konsolen-Seite (Reihenfolge bindend, Spec §2.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleFilter {
+    All,
+    Ready,
+    Offline,
+    Psn,
+}
+
+impl ConsoleFilter {
+    /// Chip-Reihenfolge (bindend).
+    pub const ALL: [ConsoleFilter; 4] = [
+        ConsoleFilter::All,
+        ConsoleFilter::Ready,
+        ConsoleFilter::Offline,
+        ConsoleFilter::Psn,
+    ];
+
+    /// Label (bindend, Spec §2.2).
+    pub fn label(self) -> &'static str {
+        match self {
+            ConsoleFilter::All => "Alle",
+            ConsoleFilter::Ready => "Bereit",
+            ConsoleFilter::Offline => "Offline",
+            ConsoleFilter::Psn => "PSN",
+        }
+    }
+
+    /// Port von `matchesFilter` (ConsolesPage.qml): „Bereit“ = Discovery
+    /// ready, „Offline“ = alles andere, „PSN“ = reine PSN-Remote-Hosts.
+    pub(crate) fn matches(self, entry: &ConsoleEntry) -> bool {
+        match self {
+            ConsoleFilter::All => true,
+            ConsoleFilter::Ready => entry.status == StatusKind::Ready,
+            ConsoleFilter::Offline => entry.status != StatusKind::Ready,
+            ConsoleFilter::Psn => entry.psn,
+        }
+    }
+}
 
 pub fn page(
     shell: &mut AppShell,
@@ -16,98 +71,266 @@ pub fn page(
 ) -> impl IntoElement {
     // Wizard offen? Dann Wizard statt Liste (keine Route-Änderung nötig).
     if shell.show_regist_wizard {
-        return crate::pages::regist_wizard::page(shell, window, cx).into_any_element();
+        return regist_wizard::page(shell, window, cx).into_any_element();
     }
 
-    let hosts = shell.backend.discovery().hosts();
-    let registered = shell.backend.settings().lock().unwrap_or_else(|e| e.into_inner()).registered_hosts().len();
+    let filter = shell.regist_wizard.console_filter;
+    let entries = console_entries(shell);
+    let filtered: Vec<ConsoleEntry> = entries
+        .iter()
+        .filter(|entry| filter.matches(entry))
+        .cloned()
+        .collect();
+    let focus_handles = shell.regist_wizard.sync_tile_focus(entries.len(), cx);
+    let ui_focus = shell.regist_wizard.sync_ui_focus(2, cx);
 
     let mut children: Vec<gpui::AnyElement> = Vec::new();
     children.push(page_header(
         shell,
         "Konsolen",
-        Some(&format!("{} entdeckt · {} registriert", hosts.len(), registered)),
+        Some(&format!(
+            "{} von {} Konsolen sichtbar",
+            filtered.len(),
+            entries.len()
+        )),
         window,
         cx,
     ));
 
-    // Filter-Chips (Platzhalter — der Konsolen-Agent baut die Chips als Buttons).
-    children.push(SectionLabel::new("Filter: Alle / Bereit / Offline / PSN").into_any_element());
-
-    children.push(
-        div()
-            .grid()
-            .grid_cols(3)
-            .gap(px(theme::SP_4))
-            .children(hosts.iter().enumerate().map(|(i, host)| {
-                let addr = host.host_addr.clone();
-                let status = match host.state {
-                    chiaki_core::discovery::DiscoveryHostState::Ready => StatusKind::Ready,
-                    chiaki_core::discovery::DiscoveryHostState::Standby => StatusKind::Standby,
-                    _ => StatusKind::Offline,
-                };
-                Card::new(ElementId::Name(format!("tile-{i}-{addr}").into()))
-                    .child(
-                        div()
-                            .text_size(px(theme::SIZE_HEADLINE))
-                            .font_weight(gpui::FontWeight(theme::WEIGHT_HEADLINE))
-                            .child(host.host_name.clone().unwrap_or_else(|| addr.clone())),
-                    )
-                    .child(StatusBadge::new(status).label(addr.clone()))
-                    .child(
-                        Button::new(
-                            ElementId::Name(format!("connect-{i}-{addr}").into()),
-                            "Verbinden",
-                        )
-                        .variant(crate::components::ButtonVariant::Primary)
-                        .on_click(cx.listener(|shell, _ev, _window, _cx| {
-                            let _ = shell; // TODO(konsolen-agent): verbinden
-                        })),
-                    )
-                    .into_any_element()
-            }))
-            .into_any_element(),
-    );
-
+    // Kopfzeile: Filter-Chips links, Registrieren rechts.
+    let chip_focus = ui_focus[0].clone();
     children.push(
         div()
             .flex()
-            .gap_2()
+            .items_center()
+            .justify_between()
+            .flex_wrap()
+            .gap(px(theme::SP_4))
             .child(
-                Button::new("open-wizard", "Konsole registrieren")
-                    .variant(crate::components::ButtonVariant::Primary)
-                    .on_click(cx.listener(|shell, _ev, _window, cx| {
-                        shell.show_regist_wizard = true;
-                        cx.notify();
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(ConsoleFilter::ALL.iter().enumerate().map(|(i, chip)| {
+                        filter_chip(i, *chip, *chip == filter, chip_focus.clone(), cx)
                     })),
             )
             .child(
-                Button::new("add-manual", "Manuellen Host hinzufügen")
+                Button::new("consoles-regist", "Konsole registrieren")
+                    .variant(ButtonVariant::Primary)
+                    .focus_handle(ui_focus[1].clone())
                     .on_click(cx.listener(|shell, _ev, _window, cx| {
-                        shell.push_toast(
-                            crate::components::ToastData::new(
-                                crate::components::ToastKind::Info,
-                                "Manueller Host",
-                            )
-                            .message("Formular kommt mit dem Konsolen-Agenten."),
-                            cx,
-                        );
+                        regist_wizard::open(shell, cx);
                     })),
             )
             .into_any_element(),
     );
 
-    if hosts.is_empty() && registered == 0 {
+    // Grid (240×140-Kacheln, Zeilenumbruch wie das QML-Flow-Layout).
+    if filtered.is_empty() {
         children.push(
-            Card::new("empty")
+            Card::new("consoles-empty")
                 .child(EmptyState::new(
                     icons::paths::SEARCH,
-                    "Noch keine Konsolen",
-                    "Discovery läuft — oder starte den Registrierungs-Wizard.",
+                    "Keine Konsolen hier",
+                    match filter {
+                        ConsoleFilter::All => {
+                            "Registriere eine Konsole oder füge einen manuellen Host hinzu.\n\
+                             Discovery läuft im Hintergrund weiter."
+                        }
+                        ConsoleFilter::Psn => {
+                            "Keine PSN-Remote-Konsolen gefunden.\n\
+                             Melde dich unter Einstellungen \u{203A} PSN an — die Konsolen deines \
+                             PSN-Accounts erscheinen dann hier."
+                        }
+                        _ => "Keine Konsole entspricht diesem Filter.",
+                    },
                 ))
+                .into_any_element(),
+        );
+    } else {
+        children.push(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(theme::SP_4))
+                .children(filtered.iter().enumerate().map(|(i, entry)| {
+                    // Original-Index für den stabilen Kachel-/Fokus-Bezug
+                    // (ConsolesPage.qml: „Original-Indizes in Chiaki.hosts“).
+                    let orig = entries
+                        .iter()
+                        .position(|e| e.addr == entry.addr && e.name == entry.name)
+                        .unwrap_or(i);
+                    console_tile(orig, entry, focus_handles[orig].clone(), shell, cx)
+                }))
                 .into_any_element(),
         );
     }
 
+    // Manueller Host (C++: ManualHostLayer — die Adresse reicht; die
+    // Verknüpfung mit einem registrierten Host macht der Registrierungs-
+    // erfolg wie im C++ `QmlRegist::success`-Pfad).
+    children.push(SectionLabel::new("Manueller Host").into_any_element());
+    children.push(
+        Card::new("manual-host-card")
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .flex_wrap()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(theme::SIZE_BODY))
+                                    .text_color(theme::TEXT_PRIMARY)
+                                    .child("Manuellen Host hinzufügen"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(theme::SIZE_CAPTION))
+                                    .text_color(theme::TEXT_SECONDARY)
+                                    .child(
+                                        "IP oder Hostname einer Konsole, die per Discovery nicht gefunden wird.",
+                                    ),
+                            ),
+                    )
+                    .child(manual_host_field(shell, window, cx)),
+            )
+            .into_any_element(),
+    );
+
     page_scaffold(children)
+}
+
+/// Filter-Chip (Optik wie FilterChip.qml: Akzent-Tönung wenn gewählt).
+fn filter_chip(
+    i: usize,
+    filter: ConsoleFilter,
+    selected: bool,
+    focus: gpui::FocusHandle,
+    cx: &mut Context<AppShell>,
+) -> gpui::AnyElement {
+    let (bg, border, fg) = if selected {
+        (
+            gpui::Hsla { a: 0.22, ..theme::ACCENT },
+            gpui::Hsla { a: 0.6, ..theme::ACCENT },
+            theme::TEXT_PRIMARY,
+        )
+    } else {
+        (gpui::transparent_black(), theme::OUTLINE, theme::TEXT_SECONDARY)
+    };
+    div()
+        .id(("console-filter", i))
+        .flex()
+        .items_center()
+        .justify_center()
+        .px(px(theme::SP_3))
+        .py(px(theme::SP_1))
+        .rounded_full()
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .text_size(px(theme::SIZE_CAPTION))
+        .font_weight(FontWeight(if selected {
+            theme::WEIGHT_HEADLINE
+        } else {
+            theme::WEIGHT_CAPTION
+        }))
+        .text_color(fg)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::SURFACE2))
+        .track_focus(&focus)
+        .focus(|s| s.border_2().border_color(theme::ACCENT))
+        .on_click(cx.listener(move |shell, _ev, _window, cx| {
+            shell.regist_wizard.console_filter = filter;
+            cx.notify();
+        }))
+        .child(filter.label().to_string())
+        .into_any_element()
+}
+
+/// Manueller-Host-Eingabe + Hinzufügen-Button (kontrolliertes Feld über den
+/// Seitenzustand, Fokus-Handle persistent in [`regist_wizard::WizardState`]).
+fn manual_host_field(
+    shell: &mut AppShell,
+    window: &mut Window,
+    cx: &mut Context<AppShell>,
+) -> gpui::AnyElement {
+    // Von Home angefordert (Schnellaktion): Feld nach dem Frame fokussieren.
+    if shell.regist_wizard.manual_focus_pending {
+        shell.regist_wizard.manual_focus_pending = false;
+        let handle = shell.regist_wizard.manual_host_focus.clone();
+        window.defer(cx, move |window, _cx| handle.focus(window));
+    }
+
+    let value = shell.regist_wizard.manual_host.clone();
+    let focus = shell.regist_wizard.manual_host_focus.clone();
+    let weak = cx.entity().downgrade();
+
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            TextField::new("manual-host-field")
+                .value(value)
+                .placeholder("z. B. 192.168.1.42")
+                .width(260.0)
+                .focus_handle(focus)
+                .on_change(move |v, _window, cx| {
+                    let v = v.to_string();
+                    let _ = weak.update(cx, |shell, _cx| shell.regist_wizard.manual_host = v);
+                }),
+        )
+        .child(
+            Button::new("manual-host-add", "Hinzufügen").on_click(cx.listener(
+                |shell, _ev, _window, cx| add_manual_host(shell, cx),
+            )),
+        )
+        .into_any_element()
+}
+
+/// Port von `QmlBackend::addManualHost` (unregistriert): ManualHost anlegen.
+fn add_manual_host(shell: &mut AppShell, cx: &mut Context<AppShell>) {
+    let addr = shell.regist_wizard.manual_host.trim().to_string();
+    if addr.is_empty() {
+        shell.push_toast(
+            ToastData::new(ToastKind::Warn, "Keine Adresse")
+                .message("Gib eine IP oder einen Hostnamen ein."),
+            cx,
+        );
+        return;
+    }
+    let saved = shell
+        .backend
+        .settings()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .update(|s| {
+            s.set_manual_host(ManualHost::new(-1, addr.clone(), false, HostMac::default()));
+        });
+    match saved {
+        Ok(_) => {
+            shell.regist_wizard.manual_host.clear();
+            shell.push_toast(
+                ToastData::new(ToastKind::Success, "Manueller Host hinzugefügt").message(addr),
+                cx,
+            );
+        }
+        Err(err) => {
+            shell.push_toast(
+                ToastData::new(ToastKind::Danger, "Speichern fehlgeschlagen")
+                    .message(err.to_string()),
+                cx,
+            );
+        }
+    }
 }

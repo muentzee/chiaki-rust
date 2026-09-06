@@ -22,6 +22,7 @@ pub mod components;
 pub mod icons;
 pub mod motion;
 pub mod pages;
+pub mod psn_login;
 pub mod theme;
 
 use std::sync::{Arc, Mutex};
@@ -32,18 +33,23 @@ pub use app::{AppShell, Route};
 
 /// Startet die App (tracing + Settings + gpui-Fenster) und blockiert bis
 /// zum Beenden. chiaki-app braucht nur diesen Aufruf.
-pub fn run() -> gpui::Result<()> {
+///
+/// `profile` entspricht dem `--profile <name>`-Argument der C++-GUI
+/// (QCommandLineOption "profile" in gui/src/main.cpp): Nicht-leere Namen
+/// laden `profiles/<name>.ini` statt `settings.ini` (Steam-Launch-Options).
+pub fn run(profile: Option<String>) -> gpui::Result<()> {
     init_tracing();
 
     let settings = Arc::new(Mutex::new(
-        chiaki_settings::settings::Settings::open(None)?,
+        chiaki_settings::settings::Settings::open(profile.as_deref())?,
     ));
 
     let backend = backend::Backend::start(Arc::clone(&settings))?;
 
     tracing::info!(
-        "chiaki-ui startet (base: {})",
-        chiaki_settings::app_paths::base_path().display()
+        "chiaki-ui startet (base: {}, profil: {})",
+        chiaki_settings::app_paths::base_path().display(),
+        profile.as_deref().unwrap_or(""),
     );
 
     Application::new().with_assets(icons::IconAssets).run(move |cx: &mut gpui::App| {

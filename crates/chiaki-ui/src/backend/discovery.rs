@@ -13,11 +13,42 @@ use chiaki_core::discoveryservice::{DiscoveryService, DiscoveryServiceOptions};
 
 use super::events::{UiEvent, UiEventSender};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wakeup_credential_wie_cpp_sendwakeup() {
+        // \0-gefüllter 16-Byte-Key, ASCII-Hex → Zahl (toULongLong base 16).
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(b"1234ABCD");
+        assert_eq!(wakeup_credential(&key).unwrap(), 0x1234ABCD);
+
+        // 8 Zeichen ist die Obergrenze, 9 zu lang.
+        let mut key = [0u8; 16];
+        key[..9].copy_from_slice(b"1234ABCDE");
+        assert!(wakeup_credential(&key).is_err());
+
+        // Nicht-Hex-Zeichen → ungültig (wie !ok im C++).
+        let key = *b"ZYXWVUTSRQPONMLK";
+        assert!(wakeup_credential(&key).is_err());
+
+        // Leerer Key (sofort \0) → ungültig.
+        assert!(wakeup_credential(&[0; 16]).is_err());
+    }
+}
+
 /// Fehler der Discovery-Aufsetzung.
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryError {
     #[error("DiscoveryService konnte nicht gestartet werden: {0}")]
     Start(#[from] chiaki_core::error::ChiakiError),
+    /// Wakeup-Paket konnte nicht gesendet werden (Port von
+    /// `DiscoveryManager::SendWakeup` → Exception). Bewusst ohne
+    /// `#[from]`: [`DiscoveryError::Start`] bezieht denselben
+    /// ChiakiError, zwei `#[from]`-Quellen desselben Typs sind unzulässig.
+    #[error("Wakeup fehlgeschlagen: {0}")]
+    Wake(chiaki_core::error::ChiakiError),
 }
 
 #[derive(Clone)]
@@ -105,6 +136,20 @@ impl DiscoveryHandle {
         self.hosts.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Port von `DiscoveryManager::SendWakeup` (discoverymanager.cpp):
+    /// Regist-Key (16 Bytes, \0-gefüllt) an der ersten 0 kappen, als
+    /// Hex-Zahl interpretieren (max. 8 Zeichen — länger/unültig ist ein
+    /// ungültiger Key) und ein Discovery-Wakeup-Paket an `host:987/9302`
+    /// senden. Der laufende Service-Socket wird vom DiscoveryService
+    /// gehalten und ist hier nicht erreichbar — wie im C-Fallback
+    /// (`service_active == false`) wird ein temporärer Discovery-Socket
+    /// für das eine Paket aufgesetzt.
+    pub fn wake(&self, host: &str, regist_key: &[u8; 16], ps5: bool) -> Result<(), DiscoveryError> {
+        let credential = wakeup_credential(regist_key)?;
+        chiaki_core::discovery::wakeup(None, host, credential, ps5)
+            .map_err(DiscoveryError::Wake)
+    }
+
     /// Stoppt den Service (App-Ende). Wird von `Backend::shutdown` gerufen;
     /// absichtlich KEIN `Drop`-Impl: `DiscoveryHandle` ist ein Clone-Handle
     /// (`Arc` geteilt) — ein Drop eines Klons darf den Service nicht stoppen.
@@ -114,5 +159,23 @@ impl DiscoveryHandle {
             tracing::info!("Discovery Service gestoppt");
         }
     }
+}
+
+/// Port der Credential-Ableitung aus `DiscoveryManager::SendWakeup`
+/// (discoverymanager.cpp): Key an der ersten 0 kappen, Bytes als
+/// ASCII-String lesen und als Hex-Zahl parsen (`toULongLong(&ok, 16)`).
+/// Keys länger als 8 Zeichen oder mit Nicht-Hex-Zeichen sind ungültig.
+pub(crate) fn wakeup_credential(regist_key: &[u8; 16]) -> Result<u64, DiscoveryError> {
+    let key_len = regist_key.iter().position(|&b| b == 0).unwrap_or(regist_key.len());
+    let key = &regist_key[..key_len];
+    let invalid = || {
+        tracing::error!("DiscoveryManager got invalid regist key for wakeup");
+        DiscoveryError::Wake(chiaki_core::error::ChiakiError::InvalidData)
+    };
+    if key.is_empty() || key.len() > 8 {
+        return Err(invalid());
+    }
+    let key_str = std::str::from_utf8(key).map_err(|_| invalid())?;
+    u64::from_str_radix(key_str, 16).map_err(|_| invalid())
 }
 

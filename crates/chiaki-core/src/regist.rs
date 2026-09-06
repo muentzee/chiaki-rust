@@ -186,7 +186,9 @@ const REQUEST_RP_VERSION_FMT: &str = "RP-Version: {version}\r\n";
 const REQUEST_TAIL: &str = "\r\n";
 
 /// regist.c: `client_type`
-const CLIENT_TYPE: &str = "dabfa2ec873de5839bee8d3f4c0239c4282c07c25c6077a2931afcf0adc0d34f";
+/// (öffentlich, da der PSN-Regist-Pfad in chiaki-remote denselben
+/// Client-Type-Hash verwendet — siehe regist_psn.rs).
+pub const CLIENT_TYPE: &str = "dabfa2ec873de5839bee8d3f4c0239c4282c07c25c6077a2931afcf0adc0d34f";
 /// regist.c: `client_type_ps4_pre10`
 const CLIENT_TYPE_PS4_PRE10: &str = "Windows";
 
@@ -235,7 +237,11 @@ pub fn rp_application_reason_string(reason: u32) -> &'static str {
 /// `cur >= payload_size` (nicht `buf_size`!) wird 1:1 übernommen; zusätzlich
 /// wird hier ein Überlauf des Zielpuffers geprüft (im C würde snprintf
 /// abschneiden — bei realen Payload-Größen >= 0x1e0 nie relevant).
-fn request_header_format(
+///
+/// Öffentlich für den PSN-Regist-Pfad in chiaki-remote (regist_psn.rs), der
+/// denselben HTTP-Request-Header nutzt (regist.c sendet ihn identisch, nur
+/// via RUDP).
+pub fn request_header_format(
     buf: &mut [u8],
     payload_size: usize,
     target: Target,
@@ -831,7 +837,10 @@ fn regist_recv_response(
 
 /// Port von `regist_parse_response_payload()`: parst die entschlüsselte
 /// Payload als HTTP-Header und füllt `host`.
-fn parse_response_payload(
+///
+/// Öffentlich für den PSN-Regist-Pfad in chiaki-remote (regist_psn.rs) —
+/// die Response-Struktur ist identisch, nur der Transport (RUDP statt TCP).
+pub fn parse_response_payload(
     info: &RegistInfo,
     host: &mut RegisteredHost,
     buf: &[u8],

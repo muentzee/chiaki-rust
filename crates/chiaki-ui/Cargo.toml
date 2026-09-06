@@ -18,6 +18,10 @@ tracing-subscriber.workspace = true
 # siehe spike-s1-results.md). gpui re-exportiert das image-Crate nicht; die
 # image-Version in chiaki-render (0.25.x) muss typidentisch bleiben.
 gpui = "0.2.2"
+# PSN-Login-WebView (psn_login.rs — C++: QtWebEngine-Login-Dialog).
+wry = "0.44"
+# Win32-Host-Fenster des PSN-Logins (Features im Workspace definiert).
+windows.workspace = true
 
 [[bin]]
 name = "chiaki-ui"

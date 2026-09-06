@@ -335,6 +335,138 @@ pub fn encode_url_spaces(url: &str) -> String {
     url.replace(' ', "%20")
 }
 
+// ---------------------------------------------------------------------------
+// Verdrahtung mit der App (Settings + UiEventQueue) — der PSN-Agent-Pfad
+// ---------------------------------------------------------------------------
+
+/// Führt den kompletten PSN-Login aus und schreibt das Ergebnis in die
+/// Settings — Port von `QmlBackend::initPsnAuth` + `PSNToken`-/
+/// `PSNAccountID`-Handlern (psntoken.cpp / psnaccountid.cpp):
+///
+/// 1. [`start_psn_login`] (wry/WebView2-Fenster) → Access-/Refresh-Token.
+/// 2. `settings/psn_auth_token`, `settings/psn_refresh_token`,
+///    `settings/psn_auth_token_expiry` (= `now_unix() + expires_in`, als
+///    Anzeige-String im UTC-Format — das C++ formatiert
+///    `QDateTime::currentDateTime().addSecs(expires_in)` ebenfalls nur für
+///    die Anzeige, siehe `psntoken.cpp handleAccessTokenResponse`).
+/// 3. `fetch_psn_account_id` (zweiter Request, C++ `PSNAccountID::
+///    GetPsnAccountId`) → `settings/psn_account_id` (Base64) — danach ist
+///    die Account-ID im Registrierungs-Wizard vorausgefüllt (der liest sie
+///    bei jedem `open()` aus den Settings, regist_wizard.rs `open`).
+/// 4. Ergebnis als [`UiEvent::Toast`](crate::backend::UiEvent::Toast) in die
+///    Event-Queue — die Status-Row der Settings-Seite („PSN & Network“) und
+///    die Info-Karte rendern beim nächsten Frame die neuen Werte.
+///
+/// Thread-Modell: Läuft komplett ohne GPUI-Bezug. Der [`start_psn_login`]-
+/// Callback läuft auf dem psn-login-Thread (NICHT GPUI-Thread) — Settings-
+/// Lock und Netzrequest sind thread-sicher, deshalb kann der Apply-Teil
+/// direkt im Callback passieren (das im Modulkopf dokumentierte
+/// mpsc→UiEventQueue-Muster in Reinform: die UI wird ausschließlich über
+/// die [`UiEventSender`]-Queue informiert, nie vom Thread aus berührt).
+pub fn start_psn_login_for_settings(
+    settings: std::sync::Arc<std::sync::Mutex<chiaki_settings::settings::Settings>>,
+    events: crate::backend::events::UiEventSender,
+) {
+    use crate::backend::events::UiEvent;
+    use crate::components::{ToastData, ToastKind};
+
+    start_psn_login(move |result| {
+        let r = match result {
+            Ok(r) => r,
+            Err(ChiakiError::Canceled) => {
+                // Fenster vom User geschlossen — kein Toast (bewusst still,
+                // wie das C++ bei Abbruch).
+                tracing::info!("psn_login: abgebrochen (Fenster geschlossen)");
+                return;
+            }
+            Err(err) => {
+                tracing::error!("psn_login: Login fehlgeschlagen: {err}");
+                events.send(UiEvent::Toast(
+                    ToastData::new(ToastKind::Danger, "PSN-Anmeldung fehlgeschlagen")
+                        .message(err.to_string()),
+                ));
+                return;
+            }
+        };
+
+        // Tokens + Ablauf speichern (C++ handleAccessTokenResponse).
+        let expires_at_unix = psn_auth::now_unix() + r.expires_in;
+        let expiry_text = format_unix_utc(expires_at_unix);
+        let access = r.access_token.clone();
+        let save = settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .update(|s| {
+                s.set_psn_auth_token(access);
+                s.set_psn_refresh_token(r.refresh_token.clone());
+                s.set_psn_auth_token_expiry(expiry_text.clone());
+            });
+        if let Err(err) = save {
+            tracing::error!("psn_login: Tokens konnten nicht gespeichert werden: {err}");
+            events.send(UiEvent::Toast(
+                ToastData::new(ToastKind::Danger, "PSN-Anmeldung fehlgeschlagen")
+                    .message(format!("Konnte Settings nicht speichern: {err}")),
+            ));
+            return;
+        }
+
+        // Account-ID holen (zweiter Request, C++ PSNAccountID); schlägt sie
+        // fehl, bleiben die Tokens gültig — der Wizard hat dann halt keine
+        // vorausgefüllte Account-ID.
+        match psn_auth::fetch_psn_account_id(&r.access_token) {
+            Ok(account_id) => {
+                let b64 = chiaki_settings::psn::account_id_to_b64(&account_id);
+                let save = settings
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .update(|s| s.set_psn_account_id(b64));
+                if let Err(err) = save {
+                    tracing::error!("psn_login: Account-ID konnte nicht gespeichert werden: {err}");
+                }
+                tracing::info!("psn_login: PSN-Anmeldung erfolgreich (Account-ID gespeichert)");
+                events.send(UiEvent::Toast(
+                    ToastData::new(ToastKind::Success, "PSN verbunden")
+                        .message("Anmeldung erfolgreich — PSN Remote Play ist aktiv."),
+                ));
+            }
+            Err(err) => {
+                tracing::error!("psn_login: Account-ID konnte nicht geholt werden: {err}");
+                events.send(UiEvent::Toast(
+                    ToastData::new(ToastKind::Warn, "PSN unvollständig verbunden")
+                        .message(format!(
+                            "Tokens gespeichert, aber Account-ID fehlgeschlagen: {err}"
+                        )),
+                ));
+            }
+        }
+    });
+}
+
+/// Unix-Sekunden → „YYYY-MM-DD HH:MM UTC“ (Anzeige-String für
+/// `settings/psn_auth_token_expiry`; das C++ speichert ebenfalls einen
+/// formatierten Anzeige-String, `expiry.toString(settings->GetTimeFormat())`).
+/// Tage→Datum über die zivile Umkehrrechnung (Hinnant), rein auf `std`.
+pub fn format_unix_utc(unix_secs: u64) -> String {
+    let days = unix_secs / 86_400;
+    let secs_of_day = unix_secs % 86_400;
+    // Hinnant: civil_from_days (Epoch 1970-01-01 = Tag 0).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +517,17 @@ mod tests {
         assert_eq!(percent_decode("plain"), "plain");
         // kaputte Sequenz → '%' bleibt erhalten
         assert_eq!(percent_decode("100%"), "100%");
+    }
+
+    #[test]
+    fn expiry_format_golden() {
+        // Bekannte Zeitpunkte (Kalender-Rechnung, keine Sommerzeit — UTC).
+        assert_eq!(format_unix_utc(0), "1970-01-01 00:00 UTC");
+        // 2026-09-05 12:34:56 UTC (Tage seit Epoch: 20701 → 1_788_566_400)
+        assert_eq!(format_unix_utc(1_788_611_696), "2026-09-05 12:34 UTC");
+        // Schaltjahr-Tag (2000-02-29 12:00 UTC = 11016 Tage + 12 h)
+        assert_eq!(format_unix_utc(951_825_600), "2000-02-29 12:00 UTC");
+        // Jahreswechsel (2024-12-31 23:59 UTC, 2024 ist Schaltjahr)
+        assert_eq!(format_unix_utc(1_735_689_540), "2024-12-31 23:59 UTC");
     }
 }

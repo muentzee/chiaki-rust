@@ -98,6 +98,50 @@ impl ControllerHandle {
         combine_states(&states)
     }
 
+    // -- Session-Feedback (StreamView-Agent): dünne Durchleitungen an die
+    // Manager — Port der controller->SetRumble/SetTriggerEffects-Aufrufe aus
+    // streamsession.cpp. rein additiv, kein Bestandsverhalten geändert.
+
+    /// Rumble für alle angeschlossenen Controller (CHIAKI_EVENT_RUMBLE).
+    pub fn set_rumble(&self, left: u8, right: u8) {
+        if let Some(gp) = self.gamepad.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            for (device, _) in gp.devices() {
+                gp.set_rumble(&device, left, right, 120);
+            }
+        }
+        if let Some(ds) = self.dualsense.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            let _ = ds.set_rumble(None, left, right);
+        }
+    }
+
+    /// Adaptive-Trigger-Effekte (CHIAKI_EVENT_TRIGGER_EFFECTS, nur DualSense).
+    pub fn set_trigger_effects(
+        &self,
+        type_left: u8,
+        data_left: &[u8; 10],
+        type_right: u8,
+        data_right: &[u8; 10],
+    ) {
+        if let Some(ds) = self.dualsense.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            let _ = ds.set_trigger_effects(None, type_left, data_left, type_right, data_right);
+        }
+    }
+
+    /// DualSense-Intensität (CHIAKI_EVENT_HAPTIC_INTENSITY).
+    pub fn set_haptic_intensity(&self, intensity: u8) {
+        if let Some(ds) = self.dualsense.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            let _ = ds.set_haptic_intensity(None, intensity);
+        }
+    }
+
+    /// Effekte zurücksetzen (Session-Abbau wie im C++).
+    pub fn clear_effects(&self) {
+        if let Some(ds) = self.dualsense.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            let _ = ds.clear_effects(None);
+        }
+        self.set_rumble(0, 0);
+    }
+
     /// Poll-Threads stoppen (App-Ende).
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);

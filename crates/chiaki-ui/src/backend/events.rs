@@ -14,6 +14,7 @@ use chiaki_core::discovery::DiscoveryHost;
 use chiaki_core::session::SessionEvent;
 use chiaki_input::GamepadEvent;
 
+use super::psn::PsnUiEvent;
 use crate::components::ToastData;
 
 /// Ein stabiler Host-Bezug (Settings-Registry vs. Discovery vs. PSN).
@@ -59,6 +60,23 @@ pub enum UiEvent {
     Controller(GamepadEvent),
     /// Toast anzeigen (Backend-getrieben, z. B. Verbindungsfehler).
     Toast(ToastData),
+    /// Registrierungs-Flow (Registrierungs-Wizard): Log-Zeile oder Abschluss.
+    /// Der vollständige Zustand (Log-Puffer + Result) liegt im
+    /// `RegistHandle` ([`super::sessions`]) — dieses Event dient primär dem
+    /// UI-Notify (AppShell wendet es an und rendert den Wizard neu).
+    Regist(RegistUiEvent),
+    /// PSN-Remote-Flow: Geräteliste / Verbindungsfortschritt
+    /// ([`super::psn`], Port der C++-PSN-Flows im qmlbackend.cpp).
+    Psn(PsnUiEvent),
+}
+
+/// Ereignisinhalt des Registrierungs-Flows.
+#[derive(Debug, Clone)]
+pub enum RegistUiEvent {
+    /// Eine neue Log-Zeile (bereits formatiert, inkl. Level-Zeichen).
+    Log(String),
+    /// Registrierung beendet: `Ok(Konsolen-Nickname)` oder `Err(Grund)`.
+    Finished(Result<String, String>),
 }
 
 /// Sender-Handle für Backend-Threads (Clone-fähig).

@@ -6,7 +6,7 @@
 //! und lesen/schreiben direkt die Felder (`shell.route`, `shell.toasts`, …).
 //! Backend-Zugriff immer über `shell.backend`.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     div, px, App, Context, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
@@ -48,6 +48,23 @@ impl Route {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-Connect (settings/automatic_connect + settings/auto_connect_mac)
+// ---------------------------------------------------------------------------
+
+/// Warte-Zustand des Auto-Connects beim App-Start (Port des
+/// automatic-connect-Zweigs in `QmlBackend::updateDiscoveryHosts`, ergänzt
+/// um das 5-s-Fenster aus dem Portierungsauftrag — das C++ wartet endlos).
+#[derive(Debug, Clone, Copy)]
+struct AutoConnectPending {
+    mac: [u8; 6],
+    deadline: Instant,
+}
+
+/// Wie lange nach dem Start auf einen Discovery-Treffer gewartet wird, bevor
+/// „Konsole nicht gefunden“ gemeldet wird.
+const AUTO_CONNECT_WAIT: Duration = Duration::from_secs(5);
+
+// ---------------------------------------------------------------------------
 // AppShell
 // ---------------------------------------------------------------------------
 
@@ -64,35 +81,76 @@ pub struct AppShell {
     pub dialogs: Vec<Dialog>,
     /// Registrierungs-Wizard offen (von der Konsolen-Seite gesetzt).
     pub show_regist_wizard: bool,
+    /// Seitenzustand (Wizard-Formular, Konsolen-Filter, Kachel-Fokus-Handles,
+    /// Manueller-Host-Formular) — CONTRACT-UI §5 erlaubt neue Shell-Felder.
+    pub regist_wizard: pages::regist_wizard::WizardState,
     next_toast_id: u64,
     /// Fokus des Shells (Key-Dispatch-Wurzel).
     pub shell_focus: FocusHandle,
     /// Fokus-Handles der NavRail-Einträge (parallel zu Route::nav_items()).
     pub rail_focus: Vec<FocusHandle>,
+    /// Auto-Connect beim App-Start läuft (settings/automatic_connect +
+    /// auto_connect_mac) — `Some` bis gefunden/Timeout.
+    auto_connect: Option<AutoConnectPending>,
 }
 
 impl AppShell {
     pub fn new(backend: Backend, cx: &mut Context<Self>) -> Self {
         let rail_focus = (0..Route::nav_items().len()).map(|_| cx.focus_handle()).collect();
+        // FAKE-Stream-Smoke (StreamView-Agent): mit `CHIAKI_UI_FAKE_STREAM=1`
+        // startet die App direkt in der Stream-Ansicht (Testpattern ohne
+        // Konsole) —`=pin` fordert zusätzlich eine Fake-Login-PIN an.
+        let initial_route = if std::env::var("CHIAKI_UI_FAKE_STREAM")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+        {
+            Route::Stream(HostId::Address { host: "FAKE-STREAM".into() })
+        } else {
+            Route::Home
+        };
+
+        // Auto-Connect (C++ updateDiscoveryHosts automatic-connect-Zweig):
+        // settings/automatic_connect + registrierter auto_connect_mac → nach
+        // dem Start auf einen Discovery-Treffer warten (max. 5 s) und zur
+        // Stream-Ansicht schalten (die den Wake-/Connect-Flow trägt). Im
+        // FAKE-Stream-Smoke entfällt er bewusst.
+        let auto_connect = if !matches!(initial_route, Route::Stream(_)) {
+            let settings = backend.settings().lock().unwrap_or_else(|e| e.into_inner());
+            let mac = *settings.auto_connect_host().server_mac.mac();
+            (settings.automatic_connect() && mac != [0; 6])
+                .then_some(AutoConnectPending { mac, deadline: Instant::now() + AUTO_CONNECT_WAIT })
+        } else {
+            None
+        };
+
         Self {
             backend,
-            route: Route::Home,
+            route: initial_route,
             transition: None,
             toasts: Vec::new(),
             dialogs: Vec::new(),
             show_regist_wizard: false,
+            regist_wizard: pages::regist_wizard::WizardState::new(cx),
             next_toast_id: 1,
             shell_focus: cx.focus_handle(),
             rail_focus,
+            auto_connect,
         }
     }
 
     // -- Navigation ---------------------------------------------------------
 
     /// Seitenwechsel mit Fade+Slide-12px-220ms-OutCubic (Spec §1.4).
+    ///
+    /// Stream-Ansicht-Lifecycle (StreamView-Agent): beim Verlassen von
+    /// `Route::Stream` werden Fake-Thread + Session sauber gestoppt und das
+    /// Stream-Global entfernt (`pages::stream::shutdown`).
     pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
         if self.route == route {
             return;
+        }
+        if matches!(self.route, Route::Stream(_)) && !matches!(route, Route::Stream(_)) {
+            pages::stream::shutdown(&self.backend, cx);
         }
         tracing::debug!("Navigation: {:?} → {:?}", self.route, route);
         self.route = route;
@@ -169,10 +227,14 @@ impl AppShell {
 
     // -- Esc / Fokus --------------------------------------------------------
 
-    /// Esc = Zurück/Kontext abbrechen (Spec §1.3): Dialog zu → Route nach
-    /// Home (Stream zählt als Kontext, wird später mit Bestätigung).
+    /// Esc = Zurück/Kontext abbrechen (Spec §1.3): Dialog zu → Stream
+    /// (laufender Stream): Trennen-Bestätigung statt hartem Rausnavigieren
+    /// (StreamView-Agent) → Route nach Home.
     pub fn handle_escape(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.pop_dialog_if_open(cx) {
+            return;
+        }
+        if pages::stream::maybe_open_disconnect_dialog(self, cx) {
             return;
         }
         if !matches!(self.route, Route::Home) {
@@ -209,28 +271,93 @@ impl AppShell {
 
     /// 1×/Frame: Backend-Event-Queue leeren und anwenden.
     pub fn apply_events(&mut self, cx: &mut Context<Self>) {
+        // Auto-Connect-Fenster prüfen (auch ohne Queue-Events — der Event-
+        // Loop tickt alle 100 ms).
+        self.tick_auto_connect(cx);
+
         let events = self.backend.poll_events();
         if events.is_empty() {
             return;
         }
         for event in events {
             match event {
-                UiEvent::HostFound(_) | UiEvent::HostRemoved { .. } | UiEvent::HostsChanged => {
+                UiEvent::HostFound(_)
+                | UiEvent::HostRemoved { .. }
+                | UiEvent::HostsChanged
+                | UiEvent::Regist(_) => {
                     // Seiten lesen discovery.hosts() direkt beim Render —
                     // hier reicht ein Notify.
                     cx.notify();
                 }
-                UiEvent::Session { event, .. } => {
-                    self.on_session_event(event, cx);
+                UiEvent::Session { session_id, event } => {
+                    // StreamView-Agent: Ist die Stream-Ansicht aktiv, verbraucht
+                    // sie das Event (Connected/PIN/Keyboard/Quit → Flow- und
+                    // Overlay-Logik inkl. eigener Toasts/Navigation). Ohne
+                    // Stream-Ansicht greift der Fallback darunter.
+                    if !pages::stream::forward_session_event(session_id, event.clone(), cx) {
+                        self.on_session_event(event, cx);
+                    }
                 }
                 UiEvent::Controller(_) => {
                     // Controller-Badges rendern bei Bedarf neu.
+                    cx.notify();
+                }
+                UiEvent::Psn(psn) => {
+                    // PSN-Remote-Flow (backend::psn): Geräteliste in den
+                    // PsnHandle übernehmen, Connecting-Stufen an die
+                    // Stream-Ansicht weiterleiten (falls aktiv).
+                    match psn {
+                        crate::backend::PsnUiEvent::Devices(devices) => {
+                            self.backend.psn().apply_devices(devices);
+                        }
+                        crate::backend::PsnUiEvent::DevicesFailed(_) => {
+                            // Fehler kommt zusätzlich als Toast-Event.
+                        }
+                        crate::backend::PsnUiEvent::Connecting(state) => {
+                            self.backend.psn().apply_connect_state(state);
+                            pages::stream::forward_psn_connect_state(state, cx);
+                        }
+                    }
                     cx.notify();
                 }
                 UiEvent::Toast(toast) => {
                     self.push_toast(toast, cx);
                 }
             }
+        }
+    }
+
+    /// Auto-Connect beim App-Start (siehe [`AutoConnectPending`]): sobald
+    /// Discovery den `auto_connect_mac`-Host meldet, zur Stream-Ansicht
+    /// schalten — die trägt Wake/Connecting/Session wie ein normaler
+    /// Verbindungs-Klick (StreamView-Agent). Nach Ablauf des 5-s-Fensters
+    /// ohne Treffer: Toast „Konsole nicht gefunden“ (Abweichung zum C++,
+    /// das endlos weiter wartet — bewusste Portierungsentscheidung).
+    fn tick_auto_connect(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.auto_connect else { return };
+        let found = self
+            .backend
+            .discovery()
+            .hosts()
+            .iter()
+            .any(|h| pages::home::mac_from_host_id(h.host_id.as_deref().unwrap_or("")) == Some(pending.mac));
+        if found {
+            self.auto_connect = None;
+            self.push_toast(
+                ToastData::new(crate::components::ToastKind::Info, "Auto-Connect")
+                    .message("Konsole gefunden — verbinde …"),
+                cx,
+            );
+            self.navigate(Route::Stream(HostId::Registered { mac: pending.mac }), cx);
+            return;
+        }
+        if Instant::now() >= pending.deadline {
+            self.auto_connect = None;
+            self.push_toast(
+                ToastData::new(crate::components::ToastKind::Warn, "Auto-Connect")
+                    .message("Konsole nicht gefunden"),
+                cx,
+            );
         }
     }
 
@@ -290,8 +417,14 @@ impl Render for AppShell {
         let focus = self.shell_focus.clone();
         window.defer(cx, move |window, _cx| focus.focus(window));
 
-        // NavRail (Spec §1.2: schmale Icon-Rail links).
-        let nav = self.render_nav_rail(window, cx);
+        // NavRail (Spec §1.2: schmale Icon-Rail links) — im Stream entfällt
+        // sie (StreamView-Agent): Video/HUD laufen fensterfüllend (Spec §2.4
+        // „Connecting-Sequence im Vollbild“/C++-Fullscreen-Stream).
+        let nav: gpui::AnyElement = if matches!(self.route, Route::Stream(_)) {
+            div().into_any_element()
+        } else {
+            self.render_nav_rail(window, cx)
+        };
 
         // Aktive Seite.
         let route = self.route.clone();

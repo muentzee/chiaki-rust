@@ -661,7 +661,7 @@ impl RudpShared {
     fn get_then_increase_counter(&self) -> u16 {
         let mut counter = self.counter.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = *counter;
-        if *counter >= u16::MAX {
+        if *counter == u16::MAX {
             *counter = 0;
         } else {
             *counter += 1;

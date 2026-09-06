@@ -394,6 +394,12 @@ struct Inner {
     main: Mutex<MainState>,
     ws: Mutex<WsState>,
     upnp: Mutex<UpnpState>,
+    /// RUDP-Instanz für Regist/Session-Request/Switch-to-Stream (C: das
+    /// session.c in `session_thread_func` einmalig aus
+    /// `chiaki_get_holepunch_sock(..., CTRL)` gebaute `session->rudp`, das
+    /// über die gesamte Session lebt). Lazy nach `punch_hole(Ctrl)` via
+    /// [`HolepunchSession::ensure_rudp`] angelegt (regist_psn.rs).
+    rudp: Mutex<Option<Arc<crate::rudp::Rudp>>>,
 }
 
 /// Handle zu einer Holepunch-Session (`ChiakiHolepunchSession`).
@@ -431,6 +437,7 @@ impl HolepunchSession {
                 main: Mutex::new(MainState::new()),
                 ws: Mutex::new(WsState::default()),
                 upnp: Mutex::new(UpnpState::default()),
+                rudp: Mutex::new(None),
             }),
         })
     }
@@ -521,6 +528,26 @@ impl HolepunchSession {
         };
         let s = sock_ref?;
         s.try_clone().ok()
+    }
+
+    /// RUDP-Instanz der Session (lazy, siehe `Inner::rudp`) — Port des
+    /// `session->rudp = chiaki_rudp_init(chiaki_get_holepunch_sock(..., CTRL))`
+    /// aus session.c: die Instanz wird einmalig aus dem Control-Socket gebaut
+    /// und von Regist, Session-Request und Switch-to-Stream gemeinsam genutzt.
+    ///
+    /// Fehler (`Uninitialized`), wenn `punch_hole(Ctrl)` noch nicht gelaufen
+    /// ist (C: `chiaki_rudp_init(NULL)` schlägt ebenfalls fehl).
+    pub(crate) fn ensure_rudp(&self) -> ChiakiResult<Arc<crate::rudp::Rudp>> {
+        let mut guard = self.inner.rudp.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(rudp) = guard.as_ref() {
+            return Ok(Arc::clone(rudp));
+        }
+        let sock = self
+            .holepunch_sock(PortType::Ctrl)
+            .ok_or(ChiakiError::Uninitialized)?;
+        let rudp = Arc::new(crate::rudp::Rudp::new(sock)?);
+        *guard = Some(Arc::clone(&rudp));
+        Ok(rudp)
     }
 
     /// Port von `chiaki_holepunch_session_get_stun_allocation()`.
@@ -1625,7 +1652,8 @@ impl HolepunchSession {
                 tracing::error!("Couldn't remove our holepunch session gracefully from PlayStation servers.");
             }
             let notif_query = NOTIFICATION_TYPE_MEMBER_DELETED | NOTIFICATION_TYPE_SESSION_DELETED;
-            loop {
+            let mut finished = false;
+            while !finished {
                 match self.wait_for_notification(
                     notif_query,
                     Duration::from_secs(SESSION_DELETION_TIMEOUT_SEC),
@@ -1648,13 +1676,14 @@ impl HolepunchSession {
                             log_session_state(*state);
                             drop(state);
                             tracing::info!("chiaki_holepunch_session_fini: Holepunch session deleted.");
+                            finished = true;
+                        } else {
+                            tracing::error!(
+                                "chiaki_holepunch_session_fini: Got unexpected notification of type {}",
+                                notif.type_
+                            );
                             break;
                         }
-                        tracing::error!(
-                            "chiaki_holepunch_session_fini: Got unexpected notification of type {}",
-                            notif.type_
-                        );
-                        break;
                     }
                 }
             }

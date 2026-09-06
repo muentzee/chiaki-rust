@@ -172,6 +172,27 @@ pub struct HolepunchRegistInfo {
     pub regist_local_ip: String,
 }
 
+/// Für den Ctrl-RUDP-Pfad (ctrl.rs) gespiegelte `RudpMessage` — chiaki-core
+/// darf chiaki-remote nicht importieren (Dependency-Richtung remote → core),
+/// daher definiert das Trait-Objekt diesen Mirror-Typ, den das
+/// [`HolepunchSession`]-Impl in chiaki-remote aus der empfangenen
+/// RUDP-Message befüllt (inkl. Sub-Message-Kette, C: `RudpMessage.subMessage`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CtrlRudpMessage {
+    /// C: `message.subtype` (erstes Byte des Type-Felds im Framing).
+    pub subtype: u8,
+    /// C: `message.type` (roher 16-Bit-Type-Wert).
+    pub type_: u16,
+    /// C: `message.remote_counter` (lokaler Counter der Gegenstelle + 1,
+    /// siehe `chiaki_rudp_message_parse`).
+    pub remote_counter: u16,
+    /// C: `message.data`/`data_size`.
+    pub data: Vec<u8>,
+    /// C: `message.subMessage` (rekursiv; im Wire-Format maximal eine
+    /// weitere Stufe, geparst wird die Kette komplett).
+    pub sub_message: Option<Box<CtrlRudpMessage>>,
+}
+
 /// Port der holepunch-/rudp-Operationen, die `session.c` an
 /// `ChiakiHolepunchSession`/`ChiakiRudp` ausführt. chiaki-remote
 /// implementiert dieses Trait für seine `HolepunchSession`.
@@ -202,17 +223,46 @@ pub trait HolepunchSession: Send + Sync {
     /// `session_thread_request_session` — liefert `remote_counter`.
     fn rudp_start_session(&self) -> ChiakiResult<u16>;
     /// C: `chiaki_send_recv_http_header_psn()` — Request senden, HTTP-Header
-    /// empfangen; liefert `(header_size, received_size)`.
+    /// empfangen; liefert `(header_size, received_size, remote_counter)`. Der
+    /// `remote_counter` ist — wie im C (`*remote_counter = message.remote_counter`)
+    /// — der für das nachfolgende `rudp_finish` zu nutende aktualisierte Wert.
     fn rudp_send_recv_http_header(
         &self,
         request: &[u8],
         remote_counter: u16,
         buf: &mut [u8],
-    ) -> ChiakiResult<(usize, usize)>;
+    ) -> ChiakiResult<(usize, usize, u16)>;
     /// C: `chiaki_rudp_send_recv(..., ACK, FINISH, 0, 3)`.
     fn rudp_finish(&self, remote_counter: u16) -> ChiakiResult<()>;
     /// C: `chiaki_rudp_send_switch_to_stream_connection_message()`.
     fn rudp_send_switch_to_stream_connection(&self) -> ChiakiResult<()>;
+
+    // ---- Ctrl-RUDP-Bedarf (RUDP-Zweige von ctrl.c; Implementierung in
+    //      chiaki-remote, siehe regist_psn.rs-Trait-Impl) ----
+
+    /// C (ctrl.c `ctrl_connect`, ctrl.c:1165-1187): "CTRL - Starting RUDP
+    /// session" — INIT/COOKIE-Handshake über die bestehende Rudp-Instanz
+    /// (Wire-Protokoll wie [`HolepunchSession::rudp_start_session`], eigene
+    /// CTRL-Log-Texte); liefert den Remote-Counter der Cookie-Antwort.
+    fn rudp_ctrl_start_session(&self) -> ChiakiResult<u16>;
+    /// C: `chiaki_rudp_send_ctrl_message()` (ctrl_message_send-RUDP-Zweig,
+    /// ctrl.c:683): kompletten 8-Byte-Ctrl-Frame (Header + verschlüsselter
+    /// Payload) als RUDP-CTRL-Message senden und bis zum ACK in den
+    /// RUDP-Send-Buffer stellen.
+    fn rudp_send_ctrl_message(&self, message: &[u8]) -> ChiakiResult<()>;
+    /// C: `chiaki_rudp_recv_only()` (ctrl_thread_func, ctrl.c:520).
+    /// `buf_size` entspricht `sizeof(ctrl->rudp_recv_buf) - recv_buf_size`
+    /// (520 - n). Liefert `ChiakiError::Timeout`, wenn innerhalb der
+    /// RUDP-Empfangszeit kein Datagramm kommt (das C blockiert hinter einem
+    /// select; der Ctrl-Loop behandelt Timeout als "nichts empfangen",
+    /// siehe ctrl.rs-Moduldoku).
+    fn rudp_recv_only(&self, buf_size: usize) -> ChiakiResult<CtrlRudpMessage>;
+    /// C: `chiaki_rudp_ack_packet()` (Send-Buffer-ACK, ctrl.c:543/560/568).
+    fn rudp_ack_packet(&self, counter_to_ack: u16) -> ChiakiResult<()>;
+    /// C: `chiaki_rudp_send_ack_message()` (ctrl.c:545/569/1391).
+    fn rudp_send_ack_message(&self, remote_counter: u16) -> ChiakiResult<()>;
+    /// C: `chiaki_rudp_print_message()` (Fehlerdiagnose, ctrl.c:530).
+    fn rudp_print_message(&self, message: &CtrlRudpMessage);
 }
 
 // ----------------------------------------------------------------------
@@ -696,7 +746,9 @@ impl Session {
     }
 
     /// Baut das Ctrl (C: chiaki_ctrl_init) nach dem session_request und legt
-    /// es im geteilten Handle ab. Läuft im session_thread.
+    /// es im geteilten Handle ab. Läuft im session_thread. Der Transport folgt
+    /// `shared.holepunch` (C: ctrl.c verzweigt an allen Netzstellen auf
+    /// `session->rudp`): Holepunch → `CtrlTransport::Holepunch`, sonst TCP.
     fn create_ctrl(shared: &Arc<SessionShared>) -> ChiakiResult<crate::ctrl::Ctrl> {
         let (tx, rx) = mpsc::channel::<crate::ctrl::CtrlMessage>();
         // Rpcrypt ist nicht Clone (rpcrypt.rs ist fertiggestellt); das Ctrl
@@ -706,11 +758,23 @@ impl Session {
             let mut guard = shared.rpcrypt.lock().unwrap_or_else(PoisonError::into_inner);
             guard.take().ok_or(ChiakiError::Uninitialized)?
         };
-        let host_addr = shared
-            .host_addr
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .ok_or(ChiakiError::Uninitialized)?;
+        // C (ctrl.c:1299): Port/Adresse je Pfad — der Holepunch-Pfad läuft
+        // über RUDP (kein TCP-Connect, Adresse ungenutzt), der TCP-Pfad
+        // verbindet selbst zur aufgelösten Adresse.
+        let (transport, host_addr) = match &shared.holepunch {
+            Some(holepunch) => (
+                crate::ctrl::CtrlTransport::Holepunch(Arc::clone(holepunch)),
+                SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+            ),
+            None => (
+                crate::ctrl::CtrlTransport::Tcp,
+                shared
+                    .host_addr
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .ok_or(ChiakiError::Uninitialized)?,
+            ),
+        };
         let codec = shared.video_profile.lock().unwrap_or_else(PoisonError::into_inner).codec;
 
         let init = crate::ctrl::CtrlInit {
@@ -721,6 +785,7 @@ impl Session {
             hostname: shared.hostname.lock().unwrap_or_else(PoisonError::into_inner).clone(),
             host_addr,
             sock: None,
+            transport,
             codec,
             enable_dualsense: shared.enable_dualsense,
             enable_keyboard: shared.enable_keyboard,
@@ -876,6 +941,18 @@ impl Session {
     /// Aktuelles Session-Target (C: session->target).
     pub fn target(&self) -> Target {
         self.shared.target()
+    }
+
+    /// RTT der Senkusha-Phase in Mikrosekunden (C: `session->rtt` — der
+    /// session_thread hält das `chiaki_senkusha_run`-Out-Ergebnis in
+    /// `SessionShared::rtt_us` fest, siehe session_thread-Senkusha-Block).
+    /// `None`, solange die Kalibrierung noch keinen Wert geliefert hat
+    /// (0 = ungemessen; nach Senkusha-Fehler bleibt der Fallback 1000 µs).
+    pub fn rtt_us(&self) -> Option<u64> {
+        match self.shared.rtt_us.load(Ordering::SeqCst) {
+            0 => None,
+            v => Some(v),
+        }
     }
 
     fn with_ctrl<T>(
@@ -1852,7 +1929,14 @@ fn session_thread_request_session(
     };
 
     let (hostname, port) = match &holepunch {
-        Some(hp) => (hp.ps_selected_addr(), hp.ps_ctrl_port()),
+        Some(hp) => {
+            let hostname = hp.ps_selected_addr();
+            // C (session.c:939): chiaki_get_ps_selected_addr schreibt in
+            // connect_info.hostname — das Ctrl nutzt denselben Host-Namen
+            // für den HTTP Host-Header (ctrl.c:1302), also hier nachziehen.
+            *shared.hostname.lock().unwrap_or_else(PoisonError::into_inner) = hostname.clone();
+            (hostname, hp.ps_ctrl_port())
+        }
         None => (
             shared
                 .hostname
@@ -1915,9 +1999,12 @@ fn session_thread_request_session(
         (Some(hp), _) => {
             let mut buf = vec![0u8; 512];
             match hp.rudp_send_recv_http_header(request.as_bytes(), remote_counter, &mut buf) {
-                Ok((h, r)) => {
+                Ok((h, r, new_remote_counter)) => {
                     header_size = h;
                     header_buf = buf[..r].to_vec();
+                    // C: chiaki_send_recv_http_header_psn aktualisiert
+                    // *remote_counter — der ACK/FINISH nutzt den neuen Wert.
+                    remote_counter = new_remote_counter;
                 }
                 Err(e) => {
                     if e == ChiakiError::Canceled {
