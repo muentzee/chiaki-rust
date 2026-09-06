@@ -248,10 +248,14 @@ pub fn page(
                 .left_4()
                 .flex()
                 .flex_col()
+                .items_start()
                 .gap_2()
                 .max_w(px(720.0))
                 .child(top_left)
-                .child(hud::stats_row(&snap))
+                .children(hud::stats_row(&snap))
+                // Debug-Zeile (settings/overlay_debug) unterm HUD — monospaced
+                // Caption-Werte aus Presenter-/Sink-/Slot-Statistik.
+                .children(snap.debug_line.clone().map(|line| hud::debug_line(&line)))
                 .into_any_element();
         }
         streaming_overlays.push(top_left);

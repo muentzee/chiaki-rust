@@ -213,6 +213,53 @@ fn defaults_match_cxx() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Overlay-Einzel-Toggles (dokumentierte Rust-Erweiterung): alle Badge-
+/// Toggles Default TRUE (= heutiges Verhalten, alle Badges an), die Debug-
+/// Zeile Default FALSE; Roundtrip über die Setter + gespeicherte INI-Keys.
+#[test]
+fn overlay_badge_defaults_and_roundtrip() {
+    let base = temp_base("overlay-defaults");
+    let mut s = Settings::open_at(test_paths(&base)).unwrap();
+
+    // Defaults: alle Badges an, Debug-Zeile aus.
+    assert!(s.overlay_bitrate());
+    assert!(s.overlay_rtt());
+    assert!(s.overlay_loss());
+    assert!(s.overlay_frametime());
+    assert!(s.overlay_fps());
+    assert!(s.overlay_audio());
+    assert!(s.overlay_decoder());
+    assert!(s.overlay_haptics());
+    assert!(!s.overlay_debug());
+    // Master bleibt der C++-Key (Default false wie im C++-Client).
+    assert!(!s.show_stream_stats());
+
+    // Roundtrip: einzelne Badges aus + Debug-Zeile an.
+    s.set_overlay_bitrate(false);
+    s.set_overlay_haptics(false);
+    s.set_overlay_debug(true);
+    assert!(!s.overlay_bitrate());
+    assert!(s.overlay_rtt());
+    assert!(!s.overlay_haptics());
+    assert!(s.overlay_debug());
+    s.save().unwrap();
+
+    // Neu laden → Werte bestehen, andere Keys unberührt.
+    let s2 = Settings::open_at(test_paths(&base)).unwrap();
+    assert!(!s2.overlay_bitrate());
+    assert!(s2.overlay_rtt());
+    assert!(!s2.overlay_haptics());
+    assert!(s2.overlay_debug());
+
+    // INI-Keys im erwarteten Format (Sektion [settings]).
+    let ini = std::fs::read_to_string(base.join("settings.ini")).unwrap();
+    assert!(ini.contains("overlay_bitrate=false"), "ini: {ini}");
+    assert!(ini.contains("overlay_debug=true"), "ini: {ini}");
+    assert!(!ini.contains("overlay_rtt="), "Default-true-Keys werden nicht geschrieben: {ini}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn set_save_load_roundtrip() {
     let base = temp_base("roundtrip");

@@ -280,6 +280,12 @@ pub struct StreamSnapshot {
     pub vsr_scale: u32,
     pub vsr_badge_wanted: bool,
     pub video_size: (u32, u32),
+    /// Overlay-Badge-Sichtbarkeit + Debug-Zeilen-Flag (Live-Lesen der
+    /// Settings im Snapshot; Filterlogik siehe `hud::badge_visible`).
+    pub overlay: super::hud::OverlayConfig,
+    /// Debug-Zeile unterm HUD (`settings/overlay_debug`, Zusammenbau in
+    /// `update_stats`); `None` = aus.
+    pub debug_line: Option<String>,
 }
 
 /// Das Stream-UI-Global (siehe Modul-Doku).
@@ -361,6 +367,13 @@ pub struct StreamUiState {
     last_presented: u64,
     bitrate_ema: f32,
     fps_ema: f32,
+    /// Debug-Zeile (settings/overlay_debug; `None` = aus) — in update_stats
+    /// gebaut, via snapshot in die Stream-Ansicht.
+    debug_line: Option<String>,
+    /// Sink-presented-Zähler des letzten Ticks + EMA (Debug-Zeile im GPU-
+    /// Pfad — dort presentet der Sink, der Presenter bleibt bei 0).
+    last_sink_presented: u64,
+    sink_fps_ema: f32,
 
     started_at: Instant,
 }
@@ -430,6 +443,9 @@ impl StreamUiState {
             last_presented: 0,
             bitrate_ema: 0.0,
             fps_ema: 0.0,
+            debug_line: None,
+            last_sink_presented: 0,
+            sink_fps_ema: 0.0,
             started_at: Instant::now(),
         };
 
@@ -1245,6 +1261,108 @@ impl StreamUiState {
                 (x10 > 0).then_some(x10 as f32 / 10.0)
             }
         };
+
+        // Debug-Zeile (settings/overlay_debug): Live-Lesen wie der WLAN-
+        // Schwellwert; nur rechnen, wenn sie auch angezeigt wird.
+        let want_debug = {
+            let settings = self
+                .backend
+                .settings()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            settings.overlay_debug()
+        };
+        if want_debug {
+            // Sink-FPS (GPU-Pfad: presentet der Sink, der Presenter bleibt
+            // bei 0 — dieselbe EMA-Mathematik wie die Presenter-FPS oben).
+            if let Some(gpu) = &self.gpu {
+                let presented = gpu.stats_values().frames_presented;
+                let inst = (presented.saturating_sub(self.last_sink_presented) as f32) / dt;
+                self.last_sink_presented = presented;
+                self.sink_fps_ema = if self.sink_fps_ema == 0.0 {
+                    inst
+                } else {
+                    self.sink_fps_ema * 0.9 + inst * 0.1
+                };
+            }
+            self.debug_line = Some(self.build_debug_line());
+        } else {
+            self.debug_line = None;
+        }
+    }
+
+    /// Debug-Zeile unterm HUD (`settings/overlay_debug`), live Werte aus
+    /// Presenter-/Sink-/Slot-Statistik:
+    /// `presented X fps (drops Y) | media Z.Z ms (dec A / vsr B) |
+    ///  slot-drops N | conv P.Q ms p95 | sink gen/uploads/drops`
+    ///
+    /// Datenquellen:
+    /// * Presenter ([`VideoPresenter::stats`]): fps (EMA aus
+    ///   frames_presented), drops = frames_dropped, media ms = Alloc+NV12→
+    ///   BGRA+Wrap-Mittel (dieselbe Zahl wie die FRAME-TIME-Badge),
+    ///   conv p95 = conversion_us.p95_us, gen = frames_generated.
+    /// * Sink (`GpuSinkHandle::stats_values`, nur GPU-Pfad): uploads =
+    ///   cpu_uploads + d3d11_copies, drops = frames_dropped; im GPU-Pfad
+    ///   stammen presented/drops aus dem Sink (der Presenter wird dort nicht
+    ///   angefasst).
+    /// * Slot (`ActiveSession` → VideoSlot::dropped): verworfene Frames der
+    ///   1-Slot-Queue (im FAKE-Mode ohne Session „—").
+    /// * Telemetrie: Decoder-Backend + VSR-Status.
+    fn build_debug_line(&self) -> String {
+        let presenter = self.presenter.as_ref().map(|p| p.stats());
+        let sink = self.gpu.as_ref().map(|g| g.stats_values());
+        let (vsr_active, vsr_scale) = match &self.telemetry {
+            Some(t) => (
+                t.vsr_active.load(Ordering::Relaxed),
+                t.vsr_scale.load(Ordering::Relaxed),
+            ),
+            None => (false, 0),
+        };
+
+        // presented/drops: Sink-Zähler, sobald ein GPU-Pfad lief; sonst der
+        // Presenter (CPU-Pfad). FPS entsprechend: Sink-EMA im GPU-Pfad,
+        // Presenter-EMA (Badge-Wert) im CPU-Pfad.
+        let sink_presented = sink.as_ref().map(|s| s.frames_presented).unwrap_or(0);
+        let fps = if sink_presented > 0 { self.sink_fps_ema } else { self.stats.fps };
+        let drops = match &sink {
+            Some(s) if sink_presented > 0 => s.frames_dropped,
+            _ => presenter.as_ref().map(|p| p.frames_dropped).unwrap_or(0),
+        };
+        let media_ms = self.stats.frame_time_ms;
+        let dec = self
+            .telemetry
+            .as_ref()
+            .map(|t| t.decoder_backend_name())
+            .unwrap_or_else(|| "—".into());
+        let vsr = if vsr_active {
+            if vsr_scale > 100 {
+                format!("{}x", vsr_scale / 100)
+            } else {
+                "an".to_string()
+            }
+        } else {
+            "aus".to_string()
+        };
+        let slot_drops = match self.backend.sessions().active() {
+            Some(active) => active.shared_video_slot().dropped().to_string(),
+            None => "—".to_string(),
+        };
+        let conv = match presenter.as_ref().map(|p| p.conversion_us) {
+            Some(summary) if summary.count > 0 => {
+                format!("{:.2} ms p95", summary.p95_us as f32 / 1000.0)
+            }
+            _ => "—".to_string(),
+        };
+        let gen = presenter.as_ref().map(|p| p.frames_generated).unwrap_or(0);
+        let (uploads, sink_drops) = match &sink {
+            Some(s) => ((s.cpu_uploads + s.d3d11_copies).to_string(), s.frames_dropped.to_string()),
+            None => ("—".to_string(), "—".to_string()),
+        };
+
+        format!(
+            "presented {fps:.1} fps (drops {drops}) | media {media_ms:.1} ms (dec {dec} / vsr {vsr}) \
+             | slot-drops {slot_drops} | conv {conv} | sink {gen}/{uploads}/{sink_drops}",
+        )
     }
 
     /// Ausstehenden WLAN-Warn-Toast abholen (einmalig true; ausgeliefert von
@@ -1261,12 +1379,17 @@ impl StreamUiState {
             ),
             None => (false, 0),
         };
-        let vsr_badge_wanted = self
-            .backend
-            .settings()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .show_vsr_badge();
+        let (vsr_badge_wanted, overlay) = {
+            let settings = self
+                .backend
+                .settings()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            (
+                settings.show_vsr_badge(),
+                super::hud::OverlayConfig::from_settings(&settings),
+            )
+        };
         StreamSnapshot {
             stage: self.stage,
             stages: self.stages,
@@ -1289,6 +1412,8 @@ impl StreamUiState {
             vsr_scale,
             vsr_badge_wanted,
             video_size: self.presenter.as_ref().map(|p| p.size()).unwrap_or((0, 0)),
+            overlay,
+            debug_line: self.debug_line.clone(),
         }
     }
 

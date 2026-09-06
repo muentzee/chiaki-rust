@@ -403,17 +403,96 @@ pub(crate) fn sections(
         "vsr requirement rtx",
     ));
 
+    // Stream Overlay: Master + pro-Badge-Einzel-Toggles + Debug-Zeile —
+    // alle live wirksam (das Stream-HUD liest die Keys 1×/Frame live aus
+    // dem Settings-Lock; kein Session-Neustart nötig). Der VSR-Badge-Toggle
+    // bleibt bewusst in der VSR-Sektion (Abhängigkeit `visible: vsr`).
     let mut overlay = Section::new("Stream Overlay");
-    overlay.push(inactive(
-        toggle_row(
-            "video-show-stream-stats",
-            "Show stream stats during gameplay",
-            Some("Bitrate, queue depth, packet loss overlay in the stream"),
-            "hud overlay stats debug bitrate fps latency",
-            true,
-            s.show_stream_stats(),
+    overlay.push(toggle_row(
+        "video-show-stream-stats",
+        "Show stream stats during gameplay",
+        Some(
+            "Master der Stats-Badges — aus blendet die komplette Badge-Reihe im Stream aus \
+             (VSR-Badge separat)",
         ),
-        "HUD-Stats werden zur Laufzeit über das Stream-HUD gesteuert",
+        "hud overlay stats debug bitrate fps latency master",
+        true,
+        s.show_stream_stats(),
+    ));
+    overlay.push(toggle_row(
+        "video-overlay-bitrate",
+        "Badge: Bitrate",
+        Some("Mbit/s-Badge in der Stats-Reihe des Stream-HUDs"),
+        "hud overlay badge bitrate mbit",
+        true,
+        s.overlay_bitrate(),
+    ));
+    overlay.push(toggle_row(
+        "video-overlay-rtt",
+        "Badge: RTT",
+        Some("Latenz-Badge (Senkusha-RTT) in der Stats-Reihe"),
+        "hud overlay badge rtt latency ping",
+        true,
+        s.overlay_rtt(),
+    ));
+    overlay.push(toggle_row(
+        "video-overlay-loss",
+        "Badge: Loss",
+        Some("Packet-Loss-Badge in der Stats-Reihe"),
+        "hud overlay badge loss packet",
+        true,
+        s.overlay_loss(),
+    ));
+    overlay.push(toggle_row(
+        "video-overlay-frametime",
+        "Badge: Frame-Time",
+        Some("Presenter-Overhead-Badge (Alloc + NV12→BGRA + Wrap) in der Stats-Reihe"),
+        "hud overlay badge frame time",
+        true,
+        s.overlay_frametime(),
+    ));
+    overlay.push(toggle_row(
+        "video-overlay-fps",
+        "Badge: FPS",
+        Some("Framerate-Badge in der Stats-Reihe"),
+        "hud overlay badge fps framerate",
+        true,
+        s.overlay_fps(),
+    ));
+    overlay.push(toggle_row(
+        "video-overlay-audio",
+        "Badge: Audio",
+        Some("Audio-Puffer-Füllstand-Badge in der Stats-Reihe"),
+        "hud overlay badge audio buffer",
+        true,
+        s.overlay_audio(),
+    ));
+    overlay.push(toggle_row(
+        "video-overlay-decoder",
+        "Badge: Decoder",
+        Some("Decoder-Backend-Badge in der Stats-Reihe"),
+        "hud overlay badge decoder backend",
+        true,
+        s.overlay_decoder(),
+    ));
+    overlay.push(toggle_row(
+        "video-overlay-haptics",
+        "Badge: Haptics",
+        Some("Haptics-Modus-Badge in der Stats-Reihe"),
+        "hud overlay badge haptics rumble",
+        true,
+        s.overlay_haptics(),
+    ));
+    overlay.push(toggle_row(
+        "video-overlay-debug",
+        "Debug-Zeile im Stream",
+        Some(
+            "Monospaced Zeile unterm HUD: presented fps/drops, media ms (dec/vsr), slot-drops, \
+             conv p95, sink gen/uploads/drops",
+        ),
+        "hud overlay debug line drops p95 sink slot conv",
+        true,
+        s.overlay_debug(),
     ));
 
     let ft_display_reason = "libplacebo-Display-Ziel nicht portiert — nur INI-Kompatibilität";

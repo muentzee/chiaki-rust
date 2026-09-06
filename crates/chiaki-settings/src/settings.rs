@@ -922,6 +922,21 @@ impl Settings {
     acc_bool!(hide_cursor, set_hide_cursor, "settings/hide_cursor", true);
     acc_bool!(show_stream_stats, set_show_stream_stats, "settings/show_stream_stats", false);
     acc_bool!(show_vsr_badge, set_show_vsr_badge, "settings/show_vsr_badge", true);
+    // Overlay-Badge-Einzel-Toggles (dokumentierte Rust-Erweiterung — es gibt
+    // keinen C++-Pendant): je Stats-Badge einer. Default TRUE = heutiges
+    // Verhalten (alle Badges an); der Master bleibt `show_stream_stats`
+    // (aus = gar keine Badges), `show_vsr_badge` regelt separat den
+    // VSR-Badge. `overlay_debug` blendet eine Debug-Zeile unter dem HUD ein
+    // (Default FALSE).
+    acc_bool!(overlay_bitrate, set_overlay_bitrate, "settings/overlay_bitrate", true);
+    acc_bool!(overlay_rtt, set_overlay_rtt, "settings/overlay_rtt", true);
+    acc_bool!(overlay_loss, set_overlay_loss, "settings/overlay_loss", true);
+    acc_bool!(overlay_frametime, set_overlay_frametime, "settings/overlay_frametime", true);
+    acc_bool!(overlay_fps, set_overlay_fps, "settings/overlay_fps", true);
+    acc_bool!(overlay_audio, set_overlay_audio, "settings/overlay_audio", true);
+    acc_bool!(overlay_decoder, set_overlay_decoder, "settings/overlay_decoder", true);
+    acc_bool!(overlay_haptics, set_overlay_haptics, "settings/overlay_haptics", true);
+    acc_bool!(overlay_debug, set_overlay_debug, "settings/overlay_debug", false);
     acc_bool!(streamer_mode, set_streamer_mode, "settings/streamer_mode", false);
     acc_bool!(buttons_by_position, set_buttons_by_position, "settings/buttons_by_pos", false);
     acc_bool!(allow_joystick_background_events, set_allow_joystick_background_events, "settings/allow_joystick_background_events", true);
