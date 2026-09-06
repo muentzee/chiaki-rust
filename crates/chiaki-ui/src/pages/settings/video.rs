@@ -17,7 +17,9 @@ use gpui::IntoElement as _;
 use crate::app::AppShell;
 use crate::components::SelectOption;
 
-use super::{opts, select_row, slider_row, text_row, toggle_row, Section, SRow};
+use super::{
+    inactive, inactive_with, opts, select_row, slider_row, text_row, toggle_row, Section, SRow,
+};
 
 pub(crate) fn sections(
     shell: &mut AppShell,
@@ -36,6 +38,20 @@ pub(crate) fn sections(
     let s = settings.lock().unwrap_or_else(|e| e.into_inner());
 
     let window_custom = s.window_type() == WindowType::CustomResolution;
+
+    // Info-Banner (nur wenn die Video-Kategorie aktiv und keine Suche
+    // aktiv ist — bei Suche wird die Kategorie-Liste durchsucht, dort
+    // wäre der Hinweis nur Lärm): Rust-Renderer rendert ohne libplacebo.
+    let mut sections: Vec<Section> = Vec::new();
+    if !searching {
+        let mut banner = Section::new("Hinweis (Rust-Renderer)");
+        banner.push(super::info_row(
+            "Rendering-Fine-Tuning-Parameter (libplacebo) sind im Rust-Renderer ohne Funktion \
+             und werden nur für die INI-Kompatibilität gespeichert.",
+            "rust renderer libplacebo inaktiv hinweis",
+        ));
+        sections.push(banner);
+    }
 
     let mut window = Section::new("Window");
     window.push(select_row(
@@ -64,59 +80,76 @@ pub(crate) fn sections(
             });
         },
     ));
-    window.push(text_row(
-        "video-custom-width",
-        "Custom resolution width",
-        None,
-        "width pixels",
-        window_custom,
-        s.custom_resolution_width().to_string(),
-        "1920",
-        focus_for(cx, "video-custom-width"),
-        |v, s| {
-            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
-            s.set_custom_resolution_width(digits.parse().unwrap_or(0));
-        },
+    // Custom-Auflösung: Key wird vom Stream-Fenster nicht gelesen
+    // (window_type-Zweige Custom/Selected fallen auf Fit).
+    window.push(inactive(
+        text_row(
+            "video-custom-width",
+            "Custom resolution width",
+            None,
+            "width pixels",
+            window_custom,
+            s.custom_resolution_width().to_string(),
+            "1920",
+            focus_for(cx, "video-custom-width"),
+            |v, s| {
+                let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
+                s.set_custom_resolution_width(digits.parse().unwrap_or(0));
+            },
+        ),
+        "Custom-Auflösung wird vom Stream-Fenster nicht gelesen",
     ));
-    window.push(text_row(
-        "video-custom-height",
-        "Custom resolution height",
-        None,
-        "height pixels",
-        window_custom,
-        s.custom_resolution_height().to_string(),
-        "1080",
-        focus_for(cx, "video-custom-height"),
-        |v, s| {
-            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
-            s.set_custom_resolution_height(digits.parse().unwrap_or(0));
-        },
+    window.push(inactive(
+        text_row(
+            "video-custom-height",
+            "Custom resolution height",
+            None,
+            "height pixels",
+            window_custom,
+            s.custom_resolution_height().to_string(),
+            "1080",
+            focus_for(cx, "video-custom-height"),
+            |v, s| {
+                let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
+                s.set_custom_resolution_height(digits.parse().unwrap_or(0));
+            },
+        ),
+        "Custom-Auflösung wird vom Stream-Fenster nicht gelesen",
     ));
-    window.push(toggle_row(
-        "video-fullscreen-doubleclick",
-        "Toggle fullscreen on double-click",
-        None,
-        "double click fullscreen",
-        true,
-        s.fullscreen_double_click_enabled(),
+    window.push(inactive(
+        toggle_row(
+            "video-fullscreen-doubleclick",
+            "Toggle fullscreen on double-click",
+            None,
+            "double click fullscreen",
+            true,
+            s.fullscreen_double_click_enabled(),
+        ),
+        "Doppelklick-Handling im Stream-Fenster nicht portiert",
     ));
-    window.push(toggle_row(
-        "video-hide-cursor",
-        "Hide cursor during stream",
-        None,
-        "mouse pointer",
-        true,
-        s.hide_cursor(),
+    window.push(inactive(
+        toggle_row(
+            "video-hide-cursor",
+            "Hide cursor during stream",
+            None,
+            "mouse pointer",
+            true,
+            s.hide_cursor(),
+        ),
+        "Cursor-Hiding im Stream-Fenster nicht portiert",
     ));
-    window.push(select_row(
-        "video-zoom-factor",
-        "Zoom factor",
-        Some("Content zoom inside the stream window"),
-        "zoom scale content",
-        true,
-        zoom_options(),
-        &zoom_value(s.zoom_factor()),
-        |v, s| s.set_zoom_factor(v.parse().unwrap_or(-1.0)),
+    window.push(inactive(
+        select_row(
+            "video-zoom-factor",
+            "Zoom factor",
+            Some("Content zoom inside the stream window"),
+            "zoom scale content",
+            true,
+            zoom_options(),
+            &zoom_value(s.zoom_factor()),
+            |v, s| s.set_zoom_factor(v.parse().unwrap_or(-1.0)),
+        ),
+        "Zoom läuft zur Laufzeit über das Stream-HUD — der Key wird nicht gelesen",
     ));
 
     let backend_opengl = s.render_backend() == RenderBackend::OpenGL;
@@ -137,107 +170,132 @@ pub(crate) fn sections(
         &s.hw_decoder(),
         |v, s| s.set_hardware_decoder(v.to_string()),
     ));
-    rendering.push(select_row(
-        "video-decoder",
-        "Decoder",
-        Some("Stream decoder implementation"),
-        "decoder ffmpeg pi software",
-        true,
-        opts(&[("ffmpeg", "FFmpeg"), ("pi", "Pi (stored for compatibility)")]),
-        decoder_value(s.decoder()),
-        |v, s| {
-            s.set_decoder(if v == "pi" { Decoder::Pi } else { Decoder::Ffmpeg });
-        },
+    rendering.push(inactive(
+        select_row(
+            "video-decoder",
+            "Decoder",
+            Some("Stream decoder implementation"),
+            "decoder ffmpeg pi software",
+            true,
+            opts(&[("ffmpeg", "FFmpeg"), ("pi", "Pi (stored for compatibility)")]),
+            decoder_value(s.decoder()),
+            |v, s| {
+                s.set_decoder(if v == "pi" { Decoder::Pi } else { Decoder::Ffmpeg });
+            },
+        ),
+        "Pi-Decoder nicht portiert — es läuft immer FFmpeg",
     ));
-    rendering.push(toggle_row(
-        "video-use-zero-copy",
-        "Zero-copy presentation",
-        Some("Decoded frames reach the renderer without CPU copies (recommended)"),
-        "latency direct render",
-        true,
-        s.use_zero_copy(),
+    rendering.push(inactive(
+        toggle_row(
+            "video-use-zero-copy",
+            "Zero-copy presentation",
+            Some("Decoded frames reach the renderer without CPU copies (recommended)"),
+            "latency direct render",
+            true,
+            s.use_zero_copy(),
+        ),
+        "Zero-Copy-Pfad im Rust-Renderer nicht vorhanden",
     ));
-    rendering.push(toggle_row(
-        "video-vsync",
-        "Vertical sync",
-        Some("Off = lowest latency; may show tearing"),
-        "vsync tearing",
-        true,
-        s.vsync_enabled(),
+    // vsync: gpui presentet immer mit SyncInterval 0 (Present(0, 0),
+    // gpui-0.2.2 directx_renderer.rs) — der Key bleibt für INI-Kompatibilität.
+    rendering.push(inactive_with(
+        toggle_row(
+            "video-vsync",
+            "Vertical sync",
+            Some("Off = lowest latency; may show tearing"),
+            "vsync tearing",
+            true,
+            s.vsync_enabled(),
+        ),
+        "im Rust-Renderer immer aus (Present ohne Sync) \u{2014} Key bleibt für INI-Kompatibilität"
+            .to_string(),
+        "gpui presentet immer mit SyncInterval 0 (Present(0, 0))",
     ));
-    rendering.push(select_row(
-        "video-render-backend",
-        "Renderer backend",
-        Some("Changing the backend restarts the application"),
-        "vulkan opengl gpu",
-        true,
-        opts(&[("vulkan", "Vulkan"), ("opengl", "OpenGL")]),
-        if backend_opengl { "opengl" } else { "vulkan" },
-        |v, s| {
-            s.set_render_backend(if v == "opengl" {
-                RenderBackend::OpenGL
-            } else {
-                RenderBackend::Vulkan
-            });
-        },
+    rendering.push(inactive(
+        select_row(
+            "video-render-backend",
+            "Renderer backend",
+            Some("Changing the backend restarts the application"),
+            "vulkan opengl gpu",
+            true,
+            opts(&[("vulkan", "Vulkan"), ("opengl", "OpenGL")]),
+            if backend_opengl { "opengl" } else { "vulkan" },
+            |v, s| {
+                s.set_render_backend(if v == "opengl" {
+                    RenderBackend::OpenGL
+                } else {
+                    RenderBackend::Vulkan
+                });
+            },
+        ),
+        "Rendern läuft immer über GPUI (D3D11) — der Key beeinflusst nur die HDR-Codec-Wahl",
     ));
-    rendering.push(toggle_row(
-        "video-vulkan-deferred-swap",
-        "Vulkan deferred swap",
-        None,
-        "swapchain",
-        !backend_opengl,
-        s.vulkan_deferred_swap(),
+    rendering.push(inactive(
+        toggle_row(
+            "video-vulkan-deferred-swap",
+            "Vulkan deferred swap",
+            None,
+            "swapchain",
+            !backend_opengl,
+            s.vulkan_deferred_swap(),
+        ),
+        "Kein Vulkan-Swapchain im Rust-Renderer",
     ));
-    rendering.push(select_row(
-        "video-render-preset",
-        "Render preset",
-        Some("Quality presets for scaling and sharpness"),
-        "quality upscaling preset placebo",
-        true,
-        opts(&[
-            ("fast", "Fast"),
-            ("default", "Default"),
-            ("high_quality", "High Quality"),
-            ("high_quality_spatial", "High Quality + Spatial"),
-            ("high_quality_advanced_spatial", "High Quality + Adv Spatial"),
-            ("custom", "Custom"),
-        ]),
-        preset_value(s.placebo_preset()),
-        |v, s| {
-            s.set_placebo_preset(match v {
-                "fast" => PlaceboPreset::Fast,
-                "default" => PlaceboPreset::Default,
-                "high_quality" => PlaceboPreset::HighQuality,
-                "high_quality_spatial" => PlaceboPreset::HighQualitySpatial,
-                "high_quality_advanced_spatial" => PlaceboPreset::HighQualityAdvancedSpatial,
-                _ => PlaceboPreset::Custom,
-            });
-        },
+    rendering.push(inactive(
+        select_row(
+            "video-render-preset",
+            "Render preset",
+            Some("Quality presets for scaling and sharpness"),
+            "quality upscaling preset placebo",
+            true,
+            opts(&[
+                ("fast", "Fast"),
+                ("default", "Default"),
+                ("high_quality", "High Quality"),
+                ("high_quality_spatial", "High Quality + Spatial"),
+                ("high_quality_advanced_spatial", "High Quality + Adv Spatial"),
+                ("custom", "Custom"),
+            ]),
+            preset_value(s.placebo_preset()),
+            |v, s| {
+                s.set_placebo_preset(match v {
+                    "fast" => PlaceboPreset::Fast,
+                    "default" => PlaceboPreset::Default,
+                    "high_quality" => PlaceboPreset::HighQuality,
+                    "high_quality_spatial" => PlaceboPreset::HighQualitySpatial,
+                    "high_quality_advanced_spatial" => PlaceboPreset::HighQualityAdvancedSpatial,
+                    _ => PlaceboPreset::Custom,
+                });
+            },
+        ),
+        "libplacebo nicht portiert — steuert nur die Sichtbarkeit der Fine-Tuning-Rows",
     ));
-    rendering.push(select_row(
-        "video-frame-mixer",
-        "Frame mixer",
-        Some("Interpolation of consecutive frames (motion smoothness)"),
-        "interpolation motion",
-        true,
-        opts(&[
-            ("none", "None"),
-            ("oversample", "Oversample"),
-            ("hermite", "Hermite"),
-            ("linear", "Linear"),
-            ("cubic", "Cubic"),
-        ]),
-        frame_mixer_value(s.placebo_frame_mixer()),
-        |v, s| {
-            s.set_placebo_frame_mixer(match v {
-                "oversample" => PlaceboFrameMixer::Oversample,
-                "hermite" => PlaceboFrameMixer::Hermite,
-                "linear" => PlaceboFrameMixer::Linear,
-                "cubic" => PlaceboFrameMixer::Cubic,
-                _ => PlaceboFrameMixer::None,
-            });
-        },
+    rendering.push(inactive(
+        select_row(
+            "video-frame-mixer",
+            "Frame mixer",
+            Some("Interpolation of consecutive frames (motion smoothness)"),
+            "interpolation motion",
+            true,
+            opts(&[
+                ("none", "None"),
+                ("oversample", "Oversample"),
+                ("hermite", "Hermite"),
+                ("linear", "Linear"),
+                ("cubic", "Cubic"),
+            ]),
+            frame_mixer_value(s.placebo_frame_mixer()),
+            |v, s| {
+                s.set_placebo_frame_mixer(match v {
+                    "oversample" => PlaceboFrameMixer::Oversample,
+                    "hermite" => PlaceboFrameMixer::Hermite,
+                    "linear" => PlaceboFrameMixer::Linear,
+                    "cubic" => PlaceboFrameMixer::Cubic,
+                    _ => PlaceboFrameMixer::None,
+                });
+            },
+        ),
+        "libplacebo nicht portiert — nur INI-Kompatibilität",
     ));
 
     let vsr = s.nv_vsr_enabled();
@@ -291,131 +349,153 @@ pub(crate) fn sections(
     ));
 
     let mut overlay = Section::new("Stream Overlay");
-    overlay.push(toggle_row(
-        "video-show-stream-stats",
-        "Show stream stats during gameplay",
-        Some("Bitrate, queue depth, packet loss overlay in the stream"),
-        "hud overlay stats debug bitrate fps latency",
-        true,
-        s.show_stream_stats(),
+    overlay.push(inactive(
+        toggle_row(
+            "video-show-stream-stats",
+            "Show stream stats during gameplay",
+            Some("Bitrate, queue depth, packet loss overlay in the stream"),
+            "hud overlay stats debug bitrate fps latency",
+            true,
+            s.show_stream_stats(),
+        ),
+        "HUD-Stats werden zur Laufzeit über das Stream-HUD gesteuert",
     ));
 
+    let ft_display_reason = "libplacebo-Display-Ziel nicht portiert — nur INI-Kompatibilität";
     let mut display = Section::new("Display");
-    display.push(select_row(
-        "video-display-prim",
-        "Target Primaries",
-        Some("Color primaries of the stream window (Auto recommended)"),
-        "hdr display primaries gamut color",
-        true,
-        indexed_options(&[
-            "Auto",
-            "ITU-R Rec. BT.601 NTSC (Standard Gamut)",
-            "ITU-R Rec. BT.601 PAL (Standard Gamut)",
-            "ITU-R Rec. BT.709 (Standard Gamut)",
-            "ITU-R Rec. BT.470 M (Standard Gamut)",
-            "EBU Tech. 3213-E (Standard Gamut)",
-            "ITU-R Rec. BT.2020 (Wide Gamut)",
-            "Apple RGB (Wide Gamut)",
-            "Adobe RGB (Wide Gamut)",
-            "ProPhoto RGB (Wide Gamut)",
-            "CIE 1931 RGB primaries (Wide Gamut)",
-            "DCI-P3 (Wide Gamut)",
-            "DCI-P3 with D65 white point (Wide Gamut)",
-            "Panasonic V-Gamut (Wide Gamut)",
-            "Sony S-Gamut (Wide Gamut)",
-            "Traditional film primaries with Illuminant C (Wide Gamut)",
-            "ACES Primaries #0 (Wide Gamut)",
-            "ACES Primaries #1 (Wide Gamut)",
-        ]),
-        &s.display_target_prim().to_string(),
-        |v, s| s.set_display_target_prim(v.parse().unwrap_or(0)),
+    display.push(inactive(
+        select_row(
+            "video-display-prim",
+            "Target Primaries",
+            Some("Color primaries of the stream window (Auto recommended)"),
+            "hdr display primaries gamut color",
+            true,
+            indexed_options(&[
+                "Auto",
+                "ITU-R Rec. BT.601 NTSC (Standard Gamut)",
+                "ITU-R Rec. BT.601 PAL (Standard Gamut)",
+                "ITU-R Rec. BT.709 (Standard Gamut)",
+                "ITU-R Rec. BT.470 M (Standard Gamut)",
+                "EBU Tech. 3213-E (Standard Gamut)",
+                "ITU-R Rec. BT.2020 (Wide Gamut)",
+                "Apple RGB (Wide Gamut)",
+                "Adobe RGB (Wide Gamut)",
+                "ProPhoto RGB (Wide Gamut)",
+                "CIE 1931 RGB primaries (Wide Gamut)",
+                "DCI-P3 (Wide Gamut)",
+                "DCI-P3 with D65 white point (Wide Gamut)",
+                "Panasonic V-Gamut (Wide Gamut)",
+                "Sony S-Gamut (Wide Gamut)",
+                "Traditional film primaries with Illuminant C (Wide Gamut)",
+                "ACES Primaries #0 (Wide Gamut)",
+                "ACES Primaries #1 (Wide Gamut)",
+            ]),
+            &s.display_target_prim().to_string(),
+            |v, s| s.set_display_target_prim(v.parse().unwrap_or(0)),
+        ),
+        ft_display_reason,
     ));
-    display.push(select_row(
-        "video-display-trc",
-        "Target Transfer Characteristics",
-        Some("Transfer function (gamma) of the stream window"),
-        "hdr display trc gamma transfer",
-        true,
-        indexed_options(&[
-            "Auto",
-            "ITU-R Rec. BT.1886 (SDR)",
-            "IEC 61966-2-4 sRGB (SDR)",
-            "Linear light content (SDR)",
-            "IPure power gamma 1.8 (SDR)",
-            "Pure power gamma 2.0 (SDR)",
-            "Pure power gamma 2.2 (SDR)",
-            "Pure power gamma 2.4 (SDR)",
-            "Pure power gamma 2.6 (SDR)",
-            "Pure power gamma 2.8 (SDR)",
-            "ProPhoto RGB (SDR)",
-            "Digital Cinema Distribution Master (SDR)",
-            "ITU-R BT.2100 PQ / SMPTE ST2048 (HDR)",
-            "ITU-R BT.2100 HLG / ARIB STD-B67 (HDR)",
-            "Panasonic V-Log (HDR)",
-            "Sony S-Log1 (HDR)",
-            "Sony S-Log2 (HDR)",
-        ]),
-        &s.display_target_trc().to_string(),
-        |v, s| s.set_display_target_trc(v.parse().unwrap_or(0)),
+    display.push(inactive(
+        select_row(
+            "video-display-trc",
+            "Target Transfer Characteristics",
+            Some("Transfer function (gamma) of the stream window"),
+            "hdr display trc gamma transfer",
+            true,
+            indexed_options(&[
+                "Auto",
+                "ITU-R Rec. BT.1886 (SDR)",
+                "IEC 61966-2-4 sRGB (SDR)",
+                "Linear light content (SDR)",
+                "IPure power gamma 1.8 (SDR)",
+                "Pure power gamma 2.0 (SDR)",
+                "Pure power gamma 2.2 (SDR)",
+                "Pure power gamma 2.4 (SDR)",
+                "Pure power gamma 2.6 (SDR)",
+                "Pure power gamma 2.8 (SDR)",
+                "ProPhoto RGB (SDR)",
+                "Digital Cinema Distribution Master (SDR)",
+                "ITU-R BT.2100 PQ / SMPTE ST2048 (HDR)",
+                "ITU-R BT.2100 HLG / ARIB STD-B67 (HDR)",
+                "Panasonic V-Log (HDR)",
+                "Sony S-Log1 (HDR)",
+                "Sony S-Log2 (HDR)",
+            ]),
+            &s.display_target_trc().to_string(),
+            |v, s| s.set_display_target_trc(v.parse().unwrap_or(0)),
+        ),
+        ft_display_reason,
     ));
     let peak = s.display_target_peak();
-    display.push(select_row(
-        "video-display-peak-mode",
-        "Target Peak",
-        Some("Peak luminance of the display"),
-        "hdr peak nits sdr",
-        true,
-        opts(&[("0", "Auto"), ("1000", "Numeric Value")]),
-        if peak == 0 { "0" } else { "1000" },
-        |v, s| s.set_display_target_peak(if v == "0" { 0 } else { 1000 }),
+    display.push(inactive(
+        select_row(
+            "video-display-peak-mode",
+            "Target Peak",
+            Some("Peak luminance of the display"),
+            "hdr peak nits sdr",
+            true,
+            opts(&[("0", "Auto"), ("1000", "Numeric Value")]),
+            if peak == 0 { "0" } else { "1000" },
+            |v, s| s.set_display_target_peak(if v == "0" { 0 } else { 1000 }),
+        ),
+        ft_display_reason,
     ));
-    display.push(slider_row(
-        "video-display-peak-value",
-        "Target Peak Value",
-        Some("In nits"),
-        "hdr peak nits",
-        peak != 0,
-        peak.max(10) as f64,
-        10.0,
-        10000.0,
-        10.0,
-        format!("{peak} nits"),
-        |v, s| s.set_display_target_peak(v.round() as i64),
+    display.push(inactive(
+        slider_row(
+            "video-display-peak-value",
+            "Target Peak Value",
+            Some("In nits"),
+            "hdr peak nits",
+            peak != 0,
+            peak.max(10) as f64,
+            10.0,
+            10000.0,
+            10.0,
+            format!("{peak} nits"),
+            |v, s| s.set_display_target_peak(v.round() as i64),
+        ),
+        ft_display_reason,
     ));
     let contrast = s.display_target_contrast();
-    display.push(select_row(
-        "video-display-contrast-mode",
-        "Target Contrast",
-        Some("Contrast of the display"),
-        "hdr contrast infinity",
-        true,
-        opts(&[("0", "Auto"), ("-1", "Infinity"), ("1000", "Numeric Value")]),
-        &match contrast {
-            -1 => "-1".to_string(),
-            0 => "0".to_string(),
-            other => other.to_string(),
-        },
-        |v, s| {
-            let value: i64 = v.parse().unwrap_or(0);
-            // „Numeric Value“ startet bei 1000 (wie im v1-Dialog).
-            s.set_display_target_contrast(if value > 0 { 1000 } else { value });
-        },
+    display.push(inactive(
+        select_row(
+            "video-display-contrast-mode",
+            "Target Contrast",
+            Some("Contrast of the display"),
+            "hdr contrast infinity",
+            true,
+            opts(&[("0", "Auto"), ("-1", "Infinity"), ("1000", "Numeric Value")]),
+            &match contrast {
+                -1 => "-1".to_string(),
+                0 => "0".to_string(),
+                other => other.to_string(),
+            },
+            |v, s| {
+                let value: i64 = v.parse().unwrap_or(0);
+                // „Numeric Value“ startet bei 1000 (wie im v1-Dialog).
+                s.set_display_target_contrast(if value > 0 { 1000 } else { value });
+            },
+        ),
+        ft_display_reason,
     ));
-    display.push(slider_row(
-        "video-display-contrast-value",
-        "Target Contrast Value",
-        None,
-        "hdr contrast value",
-        contrast > 0,
-        contrast.max(10) as f64,
-        10.0,
-        1000000.0,
-        1000.0,
-        format!("{contrast}"),
-        |v, s| s.set_display_target_contrast(v.round() as i64),
+    display.push(inactive(
+        slider_row(
+            "video-display-contrast-value",
+            "Target Contrast Value",
+            None,
+            "hdr contrast value",
+            contrast > 0,
+            contrast.max(10) as f64,
+            10.0,
+            1000000.0,
+            1000.0,
+            format!("{contrast}"),
+            |v, s| s.set_display_target_contrast(v.round() as i64),
+        ),
+        ft_display_reason,
     ));
 
-    let mut sections = vec![window, rendering, vsr_section, overlay, display];
+    sections.extend([window, rendering, vsr_section, overlay, display]);
 
     // Rendering-Fine-Tuning (libplacebo) — nur beim Custom-Preset sichtbar
     // (wie QML `visible: filterMatch && videoPreset === 5`); die
@@ -445,6 +525,7 @@ pub(crate) fn sections(
                 super::mutate_state(cx, |s| s.advanced_open = !s.advanced_open);
             })
             .into_any_element(),
+        inactive: None,
     });
     sections.push(advanced);
 
@@ -565,9 +646,13 @@ fn no_empty_name<E>(_: E) -> Option<&'static str> {
 }
 
 // Die generischen Helfer für Placebo-Rows (direkt über die Settings-API).
+// Jede Fine-Tuning-Row ist im Rust-Build inaktiv (kein libplacebo) und wird
+// zentral hier mit dem Inaktiv-Hinweis markiert.
 mod ft {
     use super::Settings;
-    use crate::pages::settings::{select_row, slider_row, toggle_row_with, SRow};
+    use crate::pages::settings::{inactive, select_row, slider_row, toggle_row_with, SRow};
+
+    const FT_REASON: &str = "libplacebo nicht portiert — nur INI-Kompatibilität";
 
     pub(super) fn bool_row(
         id: &'static str,
@@ -576,14 +661,17 @@ mod ft {
         value: bool,
         set: fn(&mut Settings, bool),
     ) -> SRow {
-        toggle_row_with(
-            id,
-            label,
-            subtitle,
-            "placebo fine tuning",
-            true,
-            value,
-            move |v, s| set(s, v),
+        inactive(
+            toggle_row_with(
+                id,
+                label,
+                subtitle,
+                "placebo fine tuning",
+                true,
+                value,
+                move |v, s| set(s, v),
+            ),
+            FT_REASON,
         )
     }
 
@@ -598,19 +686,22 @@ mod ft {
     ) -> SRow {
         let options: Vec<crate::components::SelectOption> =
             pairs.iter().map(|(name, _)| crate::components::SelectOption::new(*name, *name)).collect();
-        select_row(
-            id,
-            label,
-            subtitle,
-            "placebo fine tuning",
-            true,
-            options,
-            name_of(current).unwrap_or("").to_string(),
-            move |v, s| {
-                if let Some((_, e)) = pairs.iter().find(|(name, _)| *name == v) {
-                    set(s, *e);
-                }
-            },
+        inactive(
+            select_row(
+                id,
+                label,
+                subtitle,
+                "placebo fine tuning",
+                true,
+                options,
+                name_of(current).unwrap_or("").to_string(),
+                move |v, s| {
+                    if let Some((_, e)) = pairs.iter().find(|(name, _)| *name == v) {
+                        set(s, *e);
+                    }
+                },
+            ),
+            FT_REASON,
         )
     }
 
@@ -624,18 +715,21 @@ mod ft {
         suffix: &str,
         set: fn(&mut Settings, f64),
     ) -> SRow {
-        slider_row(
-            id,
-            label,
-            None,
-            "placebo fine tuning",
-            true,
-            value,
-            min,
-            max,
-            step,
-            format!("{value:.2}{suffix}"),
-            move |v, s| set(s, v),
+        inactive(
+            slider_row(
+                id,
+                label,
+                None,
+                "placebo fine tuning",
+                true,
+                value,
+                min,
+                max,
+                step,
+                format!("{value:.2}{suffix}"),
+                move |v, s| set(s, v),
+            ),
+            FT_REASON,
         )
     }
 
@@ -649,18 +743,21 @@ mod ft {
         suffix: &str,
         set: fn(&mut Settings, i64),
     ) -> SRow {
-        slider_row(
-            id,
-            label,
-            None,
-            "placebo fine tuning",
-            true,
-            value as f64,
-            min as f64,
-            max as f64,
-            step as f64,
-            format!("{value}{suffix}"),
-            move |v, s| set(s, v.round() as i64),
+        inactive(
+            slider_row(
+                id,
+                label,
+                None,
+                "placebo fine tuning",
+                true,
+                value as f64,
+                min as f64,
+                max as f64,
+                step as f64,
+                format!("{value}{suffix}"),
+                move |v, s| set(s, v.round() as i64),
+            ),
+            FT_REASON,
         )
     }
 }

@@ -6,7 +6,7 @@ use chiaki_settings::app_paths;
 
 use crate::app::AppShell;
 
-use super::{action_row, info_row, select_row, toggle_row, Section};
+use super::{action_row, inactive, info_row, select_row, toggle_row, Section};
 
 pub(crate) fn sections(
     shell: &mut AppShell,
@@ -168,25 +168,25 @@ pub(crate) fn sections(
     ));
 
     let mut logging = Section::new("Logging");
-    logging.push(toggle_row(
+    logging.push(inactive(toggle_row(
         "system-log-sanitize",
         "Sanitize logs",
         Some("Removes account info and addresses from log files"),
         "sanitize privacy logs",
         true,
         sanitize,
-    ));
-    logging.push(toggle_row(
+    ), "Log-Sanitizer ist nicht implementiert"));
+    logging.push(inactive(toggle_row(
         "system-log-verbose",
         "Verbose logging",
         Some("Debug-level logs \u{2014} only for diagnostics, grows quickly"),
         "verbose debug logs",
         true,
         verbose,
-    ));
+    ), "Log-Level kommt aus der Umgebung (RUST_LOG), nicht aus diesem Key"));
 
     let mut steam = Section::new("Steam");
-    steam.push(action_row(
+    steam.push(inactive(action_row(
         "system-steam-shortcut",
         "Add to Steam library",
         Some("Creates a Steam shortcut that launches chiaki with this profile"),
@@ -207,7 +207,7 @@ pub(crate) fn sections(
                  chiaki-app-Binary verdrahtet (Dep-Zyklus chiaki-app → chiaki-ui).",
             );
         },
-    ));
+    ), "Flow wird vom chiaki-app-Binary verdrahtet (Dep-Zyklus)"));
 
     let mut data = Section::new("Data");
     data.push(action_row(

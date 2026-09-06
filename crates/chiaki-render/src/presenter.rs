@@ -196,9 +196,28 @@ impl VideoPresenter {
         let mut bgra = vec![0u8; frame.bgra_len()];
         let alloc_us = alloc_start.elapsed();
 
-        // 2) NV12 → BGRA (CPU, messbar)
+        // 2) NV12 → BGRA (CPU, parallel — messbar). Der sequenzielle Pfad
+        // kostet bei 4K ~14 ms und frisst die 60-Hz-Budgets auf (VSR-Output!);
+        // die Thread-Pool-Variante liegt laut spike-s1-results.md bei ~2,2 ms.
         let conversion_start = Instant::now();
-        if let Err(err) = frame.to_bgra(&mut bgra) {
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get().clamp(2, 8))
+            .unwrap_or(4);
+        let result = if frame.width * frame.height >= 1280 * 720 {
+            crate::nv12::nv12_to_bgra_parallel(
+                frame.y_plane(),
+                frame.y_stride,
+                frame.uv_plane(),
+                frame.uv_stride,
+                frame.width,
+                frame.height,
+                &mut bgra,
+                workers,
+            )
+        } else {
+            frame.to_bgra(&mut bgra)
+        };
+        if let Err(err) = result {
             warn!("NV12→BGRA conversion failed: {err}");
             self.inner.stats.conversion_errors.fetch_add(1, Ordering::Relaxed);
             return self.inner.previous.lock().unwrap().clone();

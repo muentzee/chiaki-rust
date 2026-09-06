@@ -234,11 +234,16 @@ pub(crate) fn open_toggler(id: &'static str) -> impl Fn(bool, &mut Window, &mut 
 // ---------------------------------------------------------------------------
 
 /// Eine SettingsRow: Suchtext (Label + Erklärtext + Tags, lowercase) +
-/// Sichtbarkeit (Abhängigkeit, z. B. „nur wenn VSR aktiv“) + Element.
+/// Sichtbarkeit (Abhängigkeit, z. B. „nur wenn VSR aktiv“) + Element +
+/// Inaktiv-Markierung (siehe [`SRow::inactive` / `inactive()`]).
 pub(crate) struct SRow {
     pub(crate) search: String,
     pub(crate) visible: bool,
     pub(crate) element: gpui::AnyElement,
+    /// Nicht-`None` = Row ist im Rust-Build ohne Funktion; der String ist
+    /// der kurze Grund (Audit-Flag, geprüft vom Test
+    /// `inactive_rows_have_reason_and_audit_md_exists`).
+    pub(crate) inactive: Option<&'static str>,
 }
 
 impl SRow {
@@ -320,7 +325,59 @@ fn row(
             .child(text_col)
             .child(control)
             .into_any_element(),
+        inactive: None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Inaktiv-Markierung (Rust-Build ohne Funktion)
+// ---------------------------------------------------------------------------
+
+/// Erklärzeilen-Suffix für im Rust-Build inaktive Settings
+/// („— im Rust-Build ohne Funktion (…Grund…)“).
+pub(crate) fn inactive_hint(reason: &str) -> String {
+    format!(" \u{2014} im Rust-Build ohne Funktion ({reason})")
+}
+
+/// Markiert eine Row als im Rust-Build inaktiv: setzt das Audit-Flag
+/// (`SRow.inactive`) und hängt unterhalb der Row eine dezente Caption-Zeile
+/// „Rust: inaktiv“ (Warn-Farbe) + Hinweistext an (Suchtext wird erweitert).
+pub(crate) fn inactive_with(mut row: SRow, hint: String, reason: &'static str) -> SRow {
+    row.inactive = Some(reason);
+    row.search.push_str(" rust inaktiv ");
+    row.search.push_str(&hint.to_lowercase());
+    row.element = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(row.element)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(theme::SIZE_CAPTION))
+                        .text_color(theme::WARN)
+                        .child("Rust: inaktiv"),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::SIZE_CAPTION))
+                        .text_color(theme::TEXT_SECONDARY)
+                        .child(hint),
+                ),
+        )
+        .into_any_element();
+    row
+}
+
+/// Standard-Variante: Hinweis nach dem Schema
+/// „Rust: inaktiv — im Rust-Build ohne Funktion (reason)“.
+pub(crate) fn inactive(row: SRow, reason: &'static str) -> SRow {
+    inactive_with(row, inactive_hint(reason), reason)
 }
 
 /// Select-Optionen aus (Wert, Label)-Paaren.
@@ -623,6 +680,7 @@ pub(crate) fn info_row(text: &str, tags: &str) -> SRow {
             .text_color(theme::TEXT_SECONDARY)
             .child(text.to_string())
             .into_any_element(),
+        inactive: None,
     }
 }
 
@@ -645,6 +703,7 @@ pub(crate) fn custom_row(
         search: search.to_lowercase(),
         visible,
         element,
+        inactive: None,
     }
 }
 
@@ -863,6 +922,11 @@ fn build_children(
             .flex()
             .flex_col()
             .gap(px(theme::SP_4))
+            // Gebundene Höhe ist Pflicht für overflow_y_scroll: ohne
+            // flex_1/min_h_0 wächst der Container unbegrenzt und der
+            // Inhalt wird schlicht abgeschnitten (kein Scrollen möglich).
+            .flex_1()
+            .min_h_0()
             .overflow_y_scroll()
             .children(rendered)
             .into_any_element()
@@ -887,8 +951,11 @@ fn build_children(
             .child(
                 div()
                     .flex_1()
+                    .flex()
+                    .flex_col()
                     .min_w_0()
                     .min_h_0()
+                    .overflow_hidden()
                     .border_l_1()
                     .border_color(theme::HAIRLINE)
                     .pl(px(theme::SP_5))
@@ -1071,7 +1138,56 @@ mod tests {
             search: hidden.search,
             visible: false,
             element: hidden.element,
+            inactive: None,
         };
         assert!(!hidden.keep("upscale"));
+    }
+
+    /// Audit-Verdrahtung: SETTINGS-AUDIT.md existiert im Workspace-Root und
+    /// jede Row mit `inactive`-Flag trägt einen Reason-String — der
+    /// `inactive()`-Wrapper setzt ihn immer, Builder-Rows sind per Default
+    /// aktiv (`None`).
+    #[test]
+    fn inactive_rows_have_reason_and_audit_md_exists() {
+        // Audit-Dokument vorhanden (Workspace-Root = ../.. vom ui-Crate).
+        let audit = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../SETTINGS-AUDIT.md");
+        assert!(
+            audit.exists(),
+            "SETTINGS-AUDIT.md fehlt im Workspace-Root: {}",
+            audit.display()
+        );
+
+        // Aktive Row: kein Flag.
+        let active = toggle_row(
+            "general-streamer-mode",
+            "Streamer mode",
+            None,
+            "privacy",
+            true,
+            true,
+        );
+        assert!(active.inactive.is_none(), "Builder-Rows dürfen kein inactive-Flag haben");
+
+        // Inaktive Row über den Wrapper: Flag + Standard-Hint-Schema.
+        let marked = inactive(
+            toggle_row("video-use-zero-copy", "Zero-copy presentation", None, "latency", true, true),
+            "Zero-Copy-Pfad im Rust-Renderer nicht vorhanden",
+        );
+        let reason = marked.inactive.expect("inaktive Row braucht einen Reason-String");
+        assert!(!reason.trim().is_empty());
+        // Der Hint ist im Suchtext (Suche soll inaktive Rows finden).
+        assert!(marked.search.contains(&inactive_hint(reason).to_lowercase()));
+
+        // Freier Hinweistext (z. B. vsync) setzt den Reason ebenfalls.
+        let custom = inactive_with(
+            toggle_row("video-vsync", "Vertical sync", None, "vsync", true, false),
+            "im Rust-Renderer immer aus (Present ohne Sync)".to_string(),
+            "gpui presentet immer mit SyncInterval 0",
+        );
+        assert_eq!(
+            custom.inactive,
+            Some("gpui presentet immer mit SyncInterval 0")
+        );
+        assert!(custom.search.contains("immer aus"));
     }
 }

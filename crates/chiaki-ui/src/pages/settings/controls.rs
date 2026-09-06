@@ -9,8 +9,8 @@ use crate::app::AppShell;
 use crate::theme;
 
 use super::{
-    action_row, combo_select, custom_row, label_col, opts, select_row, slider_row, toggle_row,
-    Section, SRow,
+    action_row, combo_select, custom_row, inactive, label_col, opts, select_row, slider_row,
+    toggle_row, Section, SRow,
 };
 
 pub(crate) fn sections(
@@ -47,14 +47,14 @@ pub(crate) fn sections(
         true,
         keyboard,
     ));
-    keyboard_section.push(toggle_row(
+    keyboard_section.push(inactive(toggle_row(
         "controls-mouse-touch",
         "Enable mouse touchpad",
         Some("The mouse acts as the console touchpad"),
         "mouse touchpad pointer",
         true,
         mouse_touch,
-    ));
+    ), "Maus-als-Touchpad im Rust-Client nicht portiert"));
     keyboard_section.push(action_row(
         "controls-reset-keys",
         "Reset all keys",
@@ -86,7 +86,7 @@ pub(crate) fn sections(
     }
 
     let mut controller = Section::new("Controller");
-    controller.push(action_row(
+    controller.push(inactive(action_row(
         "controls-change-mapping",
         "Change controller mapping",
         Some("Press buttons on the controller to capture its layout"),
@@ -105,8 +105,8 @@ pub(crate) fn sections(
                 "Wird mit dem Controller-Agenten verdrahtet (Backend-Flow fehlt noch).",
             );
         },
-    ));
-    controller.push(action_row(
+    ), "Capture-Flow folgt mit dem Controller-Agenten"));
+    controller.push(inactive(action_row(
         "controls-reset-mapping",
         "Reset controller mapping",
         Some("Restore the default SDL mapping for the next selected controller"),
@@ -123,34 +123,34 @@ pub(crate) fn sections(
                 "Wird mit dem Controller-Agenten verdrahtet (Backend-Flow fehlt noch).",
             );
         },
-    ));
-    controller.push(toggle_row(
+    ), "Capture-Flow folgt mit dem Controller-Agenten"));
+    controller.push(inactive(toggle_row(
         "controls-background-events",
         "Background controller events",
         Some("Process controller input while the window is in background"),
         "background controller input",
         true,
         background_events,
-    ));
-    controller.push(toggle_row(
+    ), "SDL-Hint wird im Rust-Input-Backend nicht gesetzt"));
+    controller.push(inactive(toggle_row(
         "controls-buttons-by-pos",
         "Buttons by position",
         Some("Use buttons by physical position instead of by label (Nintendo-style)"),
         "nintendo layout abxy",
         true,
         buttons_by_pos,
-    ));
+    ), "Positions-basiertes Button-Mapping im Input-Backend nicht umgesetzt"));
 
     let mut dpad = Section::new("Dpad Touchpad Emulation");
-    dpad.push(toggle_row(
+    dpad.push(inactive(toggle_row(
         "controls-dpad-touch-enabled",
         "Dpad touchpad emulation",
         Some("The dpad moves the touchpad cursor while the combo is held"),
         "dpad touch cursor",
         true,
         dpad_touch,
-    ));
-    dpad.push(slider_row(
+    ), "Dpad-Touchpad-Emulation nicht portiert"));
+    dpad.push(inactive(slider_row(
         "controls-dpad-touch-increment",
         "Dpad touch increment",
         None,
@@ -162,7 +162,7 @@ pub(crate) fn sections(
         1.0,
         format!("{:.2} mm (default 0.30 mm)", dpad_increment as f64 / 100.0),
         |v, s| s.set_dpad_touch_increment(v.round().clamp(1.0, u16::MAX as f64) as u16),
-    ));
+    ), "Dpad-Touchpad-Emulation nicht portiert"));
     for (index, value) in dpad_combos.iter().enumerate() {
         let id: &'static str = match index {
             0 => "controls-dpad-touch-combo-1",
@@ -170,7 +170,7 @@ pub(crate) fn sections(
             2 => "controls-dpad-touch-combo-3",
             _ => "controls-dpad-touch-combo-4",
         };
-        dpad.push(combo_select(
+        dpad.push(inactive(combo_select(
             id,
             &format!("Dpad touch combo {}", index + 1),
             "dpad combo controller button",
@@ -182,7 +182,7 @@ pub(crate) fn sections(
                 2 => s.set_dpad_touch_shortcut3(v),
                 _ => s.set_dpad_touch_shortcut4(v),
             },
-        ));
+        ), "Dpad-Touchpad-Emulation nicht portiert"));
     }
 
     let mut haptics = Section::new("Haptics");

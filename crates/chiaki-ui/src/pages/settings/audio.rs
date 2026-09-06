@@ -7,7 +7,7 @@ use chiaki_media::audio::{AudioInput, AudioOutput};
 
 use crate::app::AppShell;
 
-use super::{action_row, info_row, select_row, slider_row, toggle_row, Section};
+use super::{action_row, inactive, info_row, select_row, slider_row, toggle_row, Section};
 
 pub(crate) fn sections(
     shell: &mut AppShell,
@@ -129,15 +129,15 @@ pub(crate) fn sections(
         true,
         mic_unmuted,
     ));
-    audio.push(toggle_row(
+    audio.push(inactive(toggle_row(
         "audio-speech-processing",
         "Speech processing",
         Some("Noise suppression and echo cancellation for the microphone"),
         "speex noise echo cancel",
         true,
         speech,
-    ));
-    audio.push(slider_row(
+    ), "Speex-DSP nicht portiert"));
+    audio.push(inactive(slider_row(
         "audio-noise-suppress",
         "Noise to suppress",
         None,
@@ -149,8 +149,8 @@ pub(crate) fn sections(
         1.0,
         format!("{noise} dB (default 6 dB)"),
         |v, s| s.set_noise_suppress_level(v.round() as i64),
-    ));
-    audio.push(slider_row(
+    ), "Speex-DSP nicht portiert"));
+    audio.push(inactive(slider_row(
         "audio-echo-suppress",
         "Echo to suppress",
         None,
@@ -162,10 +162,10 @@ pub(crate) fn sections(
         1.0,
         format!("{echo} dB (default 30 dB)"),
         |v, s| s.set_echo_suppress_level(v.round() as i64),
-    ));
+    ), "Speex-DSP nicht portiert"));
 
     let mut network = Section::new("Network & Latency");
-    network.push(slider_row(
+    network.push(inactive(slider_row(
         "audio-wifi-dropped",
         "Weak Wi-Fi notification",
         Some("Shows an indicator when packet loss exceeds this value"),
@@ -177,7 +177,7 @@ pub(crate) fn sections(
         1.0,
         format!("\u{2265} {wifi} % dropped (default 3%)"),
         |v, s| s.set_wifi_dropped_notif(v.round() as u64),
-    ));
+    ), "Wi-Fi-Warnung im Stream-Overlay nicht portiert"));
     network.push(slider_row(
         "audio-packet-loss-max",
         "Packet loss reported max",

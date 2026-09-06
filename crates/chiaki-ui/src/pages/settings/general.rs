@@ -4,7 +4,7 @@
 
 use crate::app::AppShell;
 
-use super::{action_row, combo_select, opts, select_row, toggle_row, Section};
+use super::{action_row, combo_select, inactive, opts, select_row, toggle_row, Section};
 
 pub(crate) fn sections(
     shell: &mut AppShell,
@@ -40,7 +40,7 @@ pub(crate) fn sections(
     drop(s);
 
     let mut behaviour = Section::new("Behaviour");
-    behaviour.push(select_row(
+    behaviour.push(inactive(select_row(
         "general-disconnect-action",
         "Action on disconnect",
         Some("What to do with the console when the stream is disconnected"),
@@ -55,8 +55,8 @@ pub(crate) fn sections(
                 _ => chiaki_settings::settings::DisconnectAction::Ask,
             });
         },
-    ));
-    behaviour.push(select_row(
+    ), "Trenn-Aktion (Sleep/Ask) beim Stream-Ende nicht implementiert"));
+    behaviour.push(inactive(select_row(
         "general-suspend-action",
         "Action on suspend",
         Some("Console behaviour when the PC suspends during a stream"),
@@ -70,7 +70,7 @@ pub(crate) fn sections(
                 _ => chiaki_settings::settings::SuspendAction::Nothing,
             });
         },
-    ));
+    ), "Suspend-Hook für die Stream-Session nicht implementiert"));
     behaviour.push(select_row(
         "general-audio-video",
         "Audio / Video",
@@ -107,40 +107,40 @@ pub(crate) fn sections(
         true,
         automatic_connect,
     ));
-    behaviour.push(toggle_row(
+    behaviour.push(inactive(toggle_row(
         "general-auto-discovery",
         "Auto discovery",
         Some("Discover consoles on the local network while the app is running"),
         "discovery broadcast network",
         true,
         auto_discovery,
-    ));
-    behaviour.push(toggle_row(
+    ), "Discovery-Service läuft immer — der Filter greift nicht"));
+    behaviour.push(inactive(toggle_row(
         "general-remote-play-ask",
         "Ask before starting Remote Play",
         Some("Ask for confirmation before a PSN remote play session is started"),
         "remote play confirm psn",
         true,
         remote_play_ask,
-    ));
-    behaviour.push(toggle_row(
+    ), "Remote-Play-Start fragt nicht nach"));
+    behaviour.push(inactive(toggle_row(
         "general-add-steam-shortcut-ask",
         "Offer adding a Steam shortcut",
         Some("Offer to add the app to the Steam library after setup"),
         "steam shortcut library",
         true,
         add_steam_ask,
-    ));
+    ), "Steam-Shortcut-Flow ist noch nicht verdrahtet"));
 
     let mut menu = Section::new("Stream Menu");
-    menu.push(toggle_row(
+    menu.push(inactive(toggle_row(
         "general-stream-menu-enabled",
         "Stream menu shortcut enabled",
         Some("Open the in-stream menu with a controller button combo"),
         "overlay menu combo",
         true,
         stream_menu,
-    ));
+    ), "In-Stream-Menü nicht portiert — das HUD läuft über Tastatur/HUD-Button"));
     for (combo, value) in menu_combos.iter().enumerate() {
         let id: &'static str = match combo {
             0 => "general-stream-menu-combo-1",
@@ -148,7 +148,7 @@ pub(crate) fn sections(
             2 => "general-stream-menu-combo-3",
             _ => "general-stream-menu-combo-4",
         };
-        menu.push(combo_select(
+        menu.push(inactive(combo_select(
             id,
             &format!("Stream menu combo {}", combo + 1),
             "controller button",
@@ -160,7 +160,7 @@ pub(crate) fn sections(
                 2 => s.set_stream_menu_shortcut3(index),
                 _ => s.set_stream_menu_shortcut4(index),
             },
-        ));
+        ), "In-Stream-Menü nicht portiert"));
     }
 
     let mut diagnostics = Section::new("Diagnostics");
