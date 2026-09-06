@@ -52,7 +52,7 @@
 pub mod sys;
 
 use std::ffi::CString;
-use std::os::raw::{c_int, c_void};
+use std::os::raw::{c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
 use std::time::{Duration, Instant};
@@ -844,8 +844,90 @@ impl VsrUpscaler {
             frame.duration,
             frame.frames_lost,
             frame.recovered,
+            NVCV_CPU,
+            true,
             out,
         )
+    }
+
+    /// GPU-Pfad (Zero-Copy): VSR aus CUDA-Device-Pointern (NVDEC-CUDA-Raw-
+    /// Output — `AV_PIX_FMT_CUDA`, `data[0]`/`data[1]`, Pitch `linesize[0]`;
+    /// Referenz: C++ `vsrupscaler.cpp` stagt dieselben Pointer mit
+    /// `NVCV_MEM_GPU`-Views). Läuft komplett auf der GPU und lässt den Output
+    /// als GPU-RGBA liegen ([`Self::gpu_rgba_output`]) — für den
+    /// CUDA-D3D11-Interop-Schreibvorgang in die Video-Textur. KEIN CPU-
+    /// Roundtrip; `out` bleibt unbenutzt.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    pub fn process_frame_gpu(
+        &mut self,
+        y_dev: *const c_void,
+        y_pitch: usize,
+        uv_dev: *const c_void,
+        uv_pitch: usize,
+        width: u32,
+        height: u32,
+        pts: f64,
+        duration: f64,
+        frames_lost: i32,
+        recovered: bool,
+    ) -> bool {
+        if !self.active || self.disabled {
+            return false;
+        }
+        if (width, height) != self.in_size {
+            if self.fail_count == 0 {
+                tracing::error!(
+                    "VSR: frame size {}x{} != init size {}x{}, passing frame through",
+                    width,
+                    height,
+                    self.in_size.0,
+                    self.in_size.1
+                );
+            }
+            return false;
+        }
+        let mut unused = FrameBuf::new();
+        self.process_planes(
+            y_dev as *mut u8,
+            y_pitch,
+            uv_dev as *mut u8,
+            uv_pitch,
+            pts,
+            duration,
+            frames_lost,
+            recovered,
+            NVCV_GPU,
+            false,
+            &mut unused,
+        )
+    }
+
+    /// GPU-RGBA-Output des letzten erfolgreichen [`Self::process_frame_gpu`]:
+    /// `(Device-Pointer, Pitch, Breite, Höhe)`. Gültig bis zum nächsten
+    /// `process_frame_gpu`/Drop (SDK-Buffer im Decoder-CUDA-Kontext — der
+    /// Interop-Schreibvorgang muss denselben Kontext pushen).
+    pub fn gpu_rgba_output(&self) -> Option<(*const c_void, usize, u32, u32)> {
+        if !self.active {
+            return None;
+        }
+        let dst = self.dst_rgba.as_deref()?;
+        Some((
+            dst.pixels as *const c_void,
+            dst.pitch.max(0) as usize,
+            self.out_w,
+            self.out_h,
+        ))
+    }
+
+    /// Rohzeiger auf das GPU-RGBA-NvCVImage des letzten erfolgreichen
+    /// [`Self::process_frame_gpu`] — Quelle für das SDK-D3D11-Interop
+    /// ([`crate::cuda_d3d11::CudaD3d11Interop::write_from`]). Gültig bis zum
+    /// nächsten `process_frame_gpu`/Drop.
+    pub fn gpu_rgba_image(&self) -> Option<*const NvCVImage> {
+        if !self.active {
+            return None;
+        }
+        self.dst_rgba.as_deref().map(|img| img as *const NvCVImage)
     }
 
     /// VSR aus einem KOPIERTEN NV12-Frame (besessene Planes, z. B. der
@@ -883,7 +965,19 @@ impl VsrUpscaler {
         }
         let y_ptr = y.as_ptr() as *mut u8;
         let uv_ptr = uv.as_ptr() as *mut u8;
-        self.process_planes(y_ptr, y_stride, uv_ptr, uv_stride, pts, duration, frames_lost, recovered, out)
+        self.process_planes(
+            y_ptr,
+            y_stride,
+            uv_ptr,
+            uv_stride,
+            pts,
+            duration,
+            frames_lost,
+            recovered,
+            NVCV_CPU,
+            true,
+            out,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -897,6 +991,8 @@ impl VsrUpscaler {
         duration: f64,
         frames_lost: i32,
         recovered: bool,
+        src_memory: c_uint,
+        convert_out_to_cpu: bool,
         out: &mut FrameBuf,
     ) -> bool {
         let api = self.api.expect("active implies api");
@@ -931,7 +1027,7 @@ impl VsrUpscaler {
                     NVCV_Y,
                     NVCV_U8,
                     NVCV_INTERLEAVED,
-                    NVCV_CPU,
+                    src_memory,
                 );
                 (api.image_init)(
                     &mut src_uv,
@@ -942,7 +1038,7 @@ impl VsrUpscaler {
                     NVCV_Y,
                     NVCV_U8,
                     NVCV_INTERLEAVED,
-                    NVCV_CPU,
+                    src_memory,
                 );
                 (api.image_init)(
                     &mut dst_y,
@@ -1050,7 +1146,7 @@ impl VsrUpscaler {
                 unsafe { (api.cu_ctx_synchronize)() };
             }
         }
-        if st == NVCV_SUCCESS {
+        if st == NVCV_SUCCESS && convert_out_to_cpu {
             let rc = unsafe {
                 (api.image_transfer)(
                     dst_rgba as *const NvCVImage,
@@ -1066,9 +1162,43 @@ impl VsrUpscaler {
             }
         }
         if st == NVCV_SUCCESS {
+            // Nach dem VSR-Run stets synchronisieren — im GPU-Modus liest der
+            // nachfolgende Interop-Kopiervorgang (Default-Stream) dstRgba, das
+            // das VSR-Netz auf seinem SDK-internen Stream geschrieben hat.
+            unsafe { (api.cu_ctx_synchronize)() };
             unsafe { (api.cu_stream_synchronize)(self.cuda_stream) };
         }
         unsafe { self.pop_ctx() };
+
+        if !convert_out_to_cpu {
+            // GPU-Modus: der Output bleibt auf der GPU (siehe
+            // gpu_rgba_output); der CPU-Download entfällt komplett.
+            if st != NVCV_SUCCESS {
+                if self.fail_count == 0 {
+                    tracing::error!(
+                        "VSR: GPU pipeline failed in stage '{}' (status {} ({}))",
+                        failed_stage,
+                        st,
+                        sys::status_name(st)
+                    );
+                    self.last_error = Some(format!(
+                        "GPU pipeline failed in stage '{failed_stage}' (status {st})"
+                    ));
+                }
+                self.fail_count += 1;
+                if self.fail_count > MAX_CONSECUTIVE_FAILURES {
+                    tracing::error!(
+                        "VSR: GPU pipeline keeps failing (status {}), disabling upscaler",
+                        st
+                    );
+                    self.disabled = true;
+                    self.active = false;
+                }
+                return false;
+            }
+            self.fail_count = 0;
+            return true;
+        }
 
         if st != NVCV_SUCCESS {
             if self.fail_count == 0 {
@@ -1191,6 +1321,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decoder::FrameMemory;
 
     // --- Pure Helper (Parameter-Validation-Pfad, ohne GPU/DLLs) ------------
 
@@ -1350,6 +1481,7 @@ mod tests {
             duration: 1.0 / 60.0,
             frames_lost: 2,
             recovered: false,
+            memory: FrameMemory::Cpu,
         };
         (buf, frame)
     }

@@ -1231,6 +1231,31 @@ impl Settings {
         self.store.string_or("settings/hw_decoder", "auto")
     }
 
+    /// `settings/video_output` — GPU-residenter Videopfad (Spike-Variante b):
+    /// "gpu" = D3D11-Sink-Fenster + transparentes GPUI-Overlay erzwingen,
+    /// "cpu" = klassischer Presenter-Pfad (GPUI-RenderImage), "auto" = GPU,
+    /// wenn eine Zero-Copy-Kombination vorliegt (D3D11VA-Dekode oder
+    /// CUDA+VSR), sonst CPU. Default "auto" (neuer Key — dokumentierte
+    /// Rust-Erweiterung, es gibt keinen C++-Pendant).
+    pub fn video_output(&self) -> String {
+        match self.store.string_or("settings/video_output", "auto").as_str() {
+            "gpu" => "gpu".to_string(),
+            "cpu" => "cpu".to_string(),
+            _ => "auto".to_string(),
+        }
+    }
+
+    /// Setter für `settings/video_output` (normalisiert auf auto|gpu|cpu).
+    pub fn set_video_output(&mut self, v: &str) {
+        let v = match v {
+            "gpu" => "gpu",
+            "cpu" => "cpu",
+            _ => "auto",
+        };
+        self.store
+            .set_value("settings/video_output", Value::Str(v.to_string()));
+    }
+
     acc_bool!(use_zero_copy, set_use_zero_copy, "settings/use_zero_copy", true);
     acc_bool!(vulkan_deferred_swap, set_vulkan_deferred_swap, "settings/vulkan_deferred_swap", false);
 

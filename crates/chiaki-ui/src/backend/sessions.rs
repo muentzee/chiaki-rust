@@ -7,12 +7,25 @@
 //! `keymap/*` (chiaki_input::KeyboardMapper), Session-Events → UiEvents.
 //!
 //! ## Video-Pfad (implementiert)
-//! `SessionCallbacks::video_frame` (rohe H264/H265-Annexb-Samples, 1-Slot-
-//! Queue: immer nur der letzte Frame) → Media-Thread: chiaki_media::Decoder
-//! (NVDEC/FFmpeg) → NV12 → optional `chiaki_media::VsrUpscaler`
-//! (settings/nv_vsr, erzwingt CUDA-Decoder) → NV12Frame →
-//! `chiaki_render::presenter::VideoPresenter::set_frame` → StreamView nimmt
-//! `take_image()` + `VideoFrameElement`.
+//! **CPU-Pfad (Fallback):** `SessionCallbacks::video_frame` (rohe H264/H265-
+//! Annexb-Samples, 1-Slot-Queue: immer nur der letzte Frame) → Media-Thread:
+//! chiaki_media::Decoder (NVDEC/FFmpeg) → NV12 → optional
+//! `chiaki_media::VsrUpscaler` (settings/nv_vsr, erzwingt CUDA-Decoder) →
+//! NV12Frame → `chiaki_render::presenter::VideoPresenter::set_frame` →
+//! StreamView nimmt `take_image()` + `VideoFrameElement`.
+//!
+//! **GPU-Pfad (settings/video_output = auto|gpu, Spike-Variante b):** der
+//! Media-Thread lässt die Frames auf der GPU und füttert das D3D11-Video-Sink-
+//! Fenster (`chiaki_render::gpu_sink::GpuSink`, eigenes Top-Level-Fenster
+//! unter dem transparenten GPUI-Overlay):
+//! * `D3d11Copy` — D3D11VA-Dekode auf DEMSELBEN Device (externe Device-
+//!   Übergabe, raw HW-Output) → `submit_d3d11` → GPU-GPU-CopySubresourceRegion.
+//! * `CudaVsrInterop` — CUDA-Raw-Dekode → `VsrUpscaler::process_frame_gpu`
+//!   → `cuda_d3d11::CudaD3d11Interop::write_from` (SDK-Interop in die RGBA-
+//!   Textur) → `submit_rgba_ready`.
+//! * CPU-Frames (Software-Fallback) laufen über `submit_cpu` (UpdateSubresource)
+//!   — sinkt der Sink weg (Device-Lost), fällt der Pfad auf den Presenter
+//!   zurück.
 //!
 //! ## Audio-Pfad (implementiert)
 //! `audio_pcm` liefert — wie der C-`ChiakiAudioSink.frame_cb` — **rohe
@@ -67,6 +80,8 @@ use chiaki_core::session::{ConnectInfo, Session, SessionCallbacks, SessionEvent,
 use chiaki_core::takion::DisableAudioVideo as CoreDisableAudioVideo;
 use chiaki_input::KeyboardMapper;
 use chiaki_media::decoder::HwBackend;
+use chiaki_media::cuda_d3d11::CudaD3d11Interop;
+use chiaki_render::gpu_sink::GpuSinkHandle;
 use chiaki_render::presenter::VideoPresenter;
 use chiaki_settings::hosts::{self, HostMac, ManualHost, RegisteredHost};
 use chiaki_settings::settings::{RumbleHapticsIntensity, Settings};
@@ -222,6 +237,10 @@ impl VideoSlot {
     }
 }
 
+/// Exakter Titel des gpui-Hauptfensters — der GPU-Sink folgt dessen Client-
+/// Bereich (Position/Größe/Z-Ordnung) und liegt unmittelbar darunter.
+pub(crate) const GPUI_WINDOW_TITLE: &str = "Chiaki Remaster";
+
 /// Snapshot der Settings für den Media-Thread (beim Session-Start eingefroren).
 pub(crate) struct MediaSettings {
     pub codec: chiaki_core::Codec,
@@ -239,6 +258,24 @@ pub(crate) struct MediaSettings {
     pub start_mic_unmuted: bool,
     pub rumble_haptics_intensity: RumbleHapticsIntensity,
     pub haptic_override: f32,
+    /// GPU-Pfad (settings/video_output) — `None` = klassischer Presenter-Pfad.
+    pub gpu: Option<GpuPath>,
+}
+
+/// Art des GPU-Pfads (Spike-Variante b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GpuPathKind {
+    /// D3D11VA-Raw-Dekode auf dem Sink-Device → GPU-GPU-CopySubresourceRegion.
+    D3d11Copy,
+    /// CUDA-Raw-Dekode → VSR auf der GPU → SDK-Interop in die RGBA-Textur.
+    CudaVsrInterop,
+}
+
+/// Sink-Handle + Art des GPU-Pfads (Owner-Sink lebt im Session-Stop-Thread).
+#[derive(Clone)]
+pub(crate) struct GpuPath {
+    pub sink: GpuSinkHandle,
+    pub kind: GpuPathKind,
 }
 
 impl MediaSettings {
@@ -280,6 +317,7 @@ impl MediaSettings {
             start_mic_unmuted: settings.start_mic_unmuted(),
             rumble_haptics_intensity: settings.rumble_haptics_intensity(),
             haptic_override: settings.haptic_override() as f32,
+            gpu: None, // wird in connect() entschieden (needs Profil-Auflösung)
         }
     }
 }
@@ -535,6 +573,9 @@ pub struct ActiveSession {
     pub presenter: VideoPresenter,
     /// HUD-Telemetrie (Media-Thread schreibt, UI liest).
     pub telemetry: Arc<StreamTelemetry>,
+    /// GPU-Videopfad-Handle (`None` = CPU-Pfad; StreamView: is_lost-Polling
+    /// für den transparenten Video-Bereich).
+    pub gpu: Option<GpuSinkHandle>,
     shared: Arc<SessionShared>,
 }
 
@@ -784,7 +825,52 @@ impl SessionManager {
 
         let connect_info = build_connect_info(&request, &settings)?;
         let keyboard = keyboard_mapper_from_settings(&settings);
-        let media = MediaSettings::from_settings(&request, &settings);
+        let mut media = MediaSettings::from_settings(&request, &settings);
+
+        // GPU-Pfad-Entscheidung (settings/video_output): "gpu" erzwingt,
+        // "cpu" verbietet, "auto" = nur bei Zero-Copy-Kombination (VSR→CUDA-
+        // Interop oder D3D11VA→Device-interner Copy). Der Sink-Follow-Titel
+        // ist der exakte Titel des gpui-Hauptfensters.
+        let gpu_sink_owner = {
+            let want = settings.video_output();
+            let use_gpu = match want.as_str() {
+                "cpu" => false,
+                "gpu" => true,
+                _ => media.nv_vsr || matches!(media.hw_backend, HwBackend::D3D11Va),
+            };
+            if use_gpu {
+                let (w, h) = (
+                    connect_info.video_profile.width,
+                    connect_info.video_profile.height,
+                );
+                let video_size = if media.nv_vsr {
+                    chiaki_media::vsr::output_dims(w, h, media.nv_vsr_scale)
+                } else {
+                    (w, h)
+                };
+                match chiaki_render::gpu_sink::GpuSink::new(GPUI_WINDOW_TITLE, video_size) {
+                    Ok(sink) => {
+                        let kind = if media.nv_vsr {
+                            GpuPathKind::CudaVsrInterop
+                        } else {
+                            GpuPathKind::D3d11Copy
+                        };
+                        tracing::info!(
+                            "GPU-Videopfad aktiv ({kind:?}, Sink {video_size:?}, overlay {:?})",
+                            GPUI_WINDOW_TITLE
+                        );
+                        media.gpu = Some(GpuPath { sink: sink.handle(), kind });
+                        Some(sink)
+                    }
+                    Err(err) => {
+                        tracing::error!("GPU-Sink-Start fehlgeschlagen ({err}) — CPU-Pfad");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        };
         drop(settings);
 
         tracing::info!(
@@ -835,6 +921,7 @@ impl SessionManager {
             id: session_id,
             presenter: presenter.clone(),
             telemetry: Arc::clone(&telemetry),
+            gpu: media.gpu.as_ref().map(|g| g.sink.clone()),
             shared: Arc::clone(&shared),
         };
         let feedback = self.feedback_sink();
@@ -852,6 +939,9 @@ impl SessionManager {
         let shared_for_thread = Arc::clone(&shared);
         let events = self.events.clone();
         let telemetry_for_thread = Arc::clone(&telemetry);
+        // Owner-Sink in den Stop-Thread geben: er wird NACH dem Media-Thread
+        // (Kanal-Schluss) gedroppt — Render-Thread + Fenster sauber beenden.
+        let gpu_sink_for_stop = gpu_sink_owner;
         let join = std::thread::Builder::new()
             .name(format!("chiaki-ui-session-{session_id}"))
             .spawn(move || {
@@ -867,6 +957,8 @@ impl SessionManager {
                 // Media-Kanal schließen → Media-Thread räumt Audio/Haptics ab.
                 *lock(shared_for_thread.media_tx.lock()) = None;
                 *lock(telemetry_for_thread.haptics_mode.lock()) = "aus".into();
+                // GPU-Sink zuletzt (Stop-Nachricht + Join des Render-Threads).
+                drop(gpu_sink_for_stop);
                 tracing::info!("Session #{session_id} beendet");
                 events.send(UiEvent::Session {
                     session_id,
@@ -1391,10 +1483,11 @@ struct MediaTimings {
 }
 
 
-    use super::{haptics_rumble_fallback, ActiveSession, FeedbackCmd, FeedbackSink, MediaCmd, MediaSettings};
+    use super::{haptics_rumble_fallback, ActiveSession, FeedbackCmd, FeedbackSink, GpuPathKind, MediaCmd, MediaSettings};
     use chiaki_core::ChiakiResult;
     use chiaki_input::HapticsPlayer;
-    use chiaki_media::decoder::DecodedFrame;
+    use chiaki_media::cuda_d3d11::CudaD3d11Interop;
+    use chiaki_media::decoder::{DecodedFrame, DecoderOpts, FrameMemory, HwBackend};
     use chiaki_media::opus::OpusAudioDecoder;
     use chiaki_media::vsr::FrameBuf;
     use chiaki_media::{AudioInput, AudioOutput, Decoder, VsrUpscaler};
@@ -1410,14 +1503,43 @@ struct MediaTimings {
         feedback: Option<FeedbackSink>,
     ) {
         // --- Decoder (Video) ---
-        let mut decoder = match Decoder::new(settings.codec, settings.hw_backend, settings.max_fps)
-        {
+        // GPU-Pfad: raw HW-Output (kein Transfer in Systemspeicher) mit der
+        // passenden Backend-Wahl; D3D11VA dekodiert auf DEMSELBEN Device wie
+        // der Sink (+1-Referenzen — FFmpeg releast Device/Context im Decoder-
+        // Drop). Schlägt VSR im CudaVsrInterop-Modus fehl, wird der Decoder
+        // einmalig ohne raw-Output neu gebaut (CPU-Fallback, siehe unten).
+        let gpu = settings.gpu.clone();
+        let make_decoder = |raw: bool| {
+            let (backend, opts) = match &gpu {
+                Some(gpu) => match gpu.kind {
+                    GpuPathKind::CudaVsrInterop => (
+                        HwBackend::Cuda,
+                        DecoderOpts {
+                            raw_hw_output: raw,
+                            ..Default::default()
+                        },
+                    ),
+                    GpuPathKind::D3d11Copy => (
+                        HwBackend::D3D11Va,
+                        DecoderOpts {
+                            raw_hw_output: raw,
+                            d3d11_device: gpu.sink.d3d11_device_addref(),
+                            d3d11_device_context: gpu.sink.d3d11_context_addref(),
+                        },
+                    ),
+                },
+                None => (settings.hw_backend, DecoderOpts::default()),
+            };
+            Decoder::new_opts(settings.codec, backend, settings.max_fps, opts)
+        };
+        let mut decoder_raw = gpu.is_some();
+        let mut decoder = match make_decoder(decoder_raw) {
             Ok(d) => {
                 let name = match d.used_hw_backend() {
                     Some(b) => format!("{b:?}"),
                     None => "Software".into(),
                 };
-                tracing::info!("Media-Thread: Decoder bereit ({name})");
+                tracing::info!("Media-Thread: Decoder bereit ({name}, raw={decoder_raw})");
                 *session
                     .telemetry
                     .decoder_backend
@@ -1426,13 +1548,48 @@ struct MediaTimings {
                 Some(d)
             }
             Err(err) => {
-                tracing::error!("Decoder-Init fehlgeschlagen ({err:?}) — Video deaktiviert");
-                *session
-                    .telemetry
-                    .decoder_backend
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = Some("kein Decoder".into());
-                None
+                // Raw-Pfad nicht möglich (z. B. D3D11VA fehlt) → CPU-Fallback.
+                if gpu.is_some() {
+                    tracing::warn!(
+                        "Decoder-Init fehlgeschlagen ({err:?}) — erneuter Versuch ohne raw-Output"
+                    );
+                    decoder_raw = false;
+                    match make_decoder(false) {
+                        Ok(d) => {
+                            let name = match d.used_hw_backend() {
+                                Some(b) => format!("{b:?}"),
+                                None => "Software".into(),
+                            };
+                            tracing::info!("Media-Thread: Decoder bereit ({name}, raw=false)");
+                            *session
+                                .telemetry
+                                .decoder_backend
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) = Some(name);
+                            Some(d)
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                "Decoder-Init fehlgeschlagen ({err:?}) — Video deaktiviert"
+                            );
+                            *session
+                                .telemetry
+                                .decoder_backend
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) =
+                                Some("kein Decoder".into());
+                            None
+                        }
+                    }
+                } else {
+                    tracing::error!("Decoder-Init fehlgeschlagen ({err:?}) — Video deaktiviert");
+                    *session
+                        .telemetry
+                        .decoder_backend
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = Some("kein Decoder".into());
+                    None
+                }
             }
         };
 
@@ -1444,6 +1601,9 @@ struct MediaTimings {
         };
         let mut vsr_inited = false;
         let mut vsr_buf = FrameBuf::new();
+        /// SDK-D3D11-Interop-Brücke (nur GpuPathKind::CudaVsrInterop), wird
+        /// zusammen mit VSR beim ersten Frame aufgebaut.
+        let mut interop: Option<CudaD3d11Interop> = None;
         let mut t = MediaTimings::default();
         let mut prev_presented: u64 = 0;
         let mut prev_generated: u64 = 0;
@@ -1577,11 +1737,17 @@ struct MediaTimings {
             // --- Video: ALLE queued Frames in FIFO-Reihenfolge dekodieren ---
             // (C: video_sample_cb dekodiert jeden Frame; H.265-Referenzkette
             // bricht sonst → Bildzerreißen bei Bewegung). Angezeigt wird nur
-            // der NEUESTE Frame: jeder decodierter Frame wird sofort nach
-            // NV12 kopiert (DecodedFrame leiht aus dem Decoder-Pool), VSR
-            // läuft auf dem kopierten neuesten Frame (process_frame_nv12).
+            // der NEUESTE Frame. GPU-Pfad: RAW-Frames bleiben auf der GPU
+            // (Device-Pointer/Textur gelten bis zum nächsten Decode — VSR/
+            // Interop/Copy laufen EINMAL auf dem neuesten), CPU-Frames werden
+            // wie bisher nach NV12 kopiert (VSR dann per process_frame_nv12).
             {
-                let mut latest: Option<(NV12Frame, f64, f64, i32, bool)> = None;
+                enum Latest {
+                    Cpu(NV12Frame, f64, f64, i32, bool),
+                    Raw(DecodedFrame),
+                }
+                let mut latest: Option<Latest> = None;
+                let mut rebuild_decoder_cpu = false;
                 while let Some(sample) = session.shared_video_slot().pop() {
                     let Some(decoder) = decoder.as_mut() else { break };
                     let t0 = std::time::Instant::now();
@@ -1596,14 +1762,14 @@ struct MediaTimings {
                         Ok(Some(frame)) => {
                             // VSR einmalig mit dem ersten Frame initialisieren
                             // (C++: init(firstFrame, scalePct), CUDA-Kontext
-                            // aus dem Decoder).
+                            // aus dem Decoder) + im Interop-Modus die SDK-
+                            // Brücke zur Sink-RGBA-Textur.
                             if let (Some(up), false) = (&mut vsr, vsr_inited) {
-                                vsr_inited = up.init(
-                                    &frame,
-                                    decoder.cuda_context().unwrap_or(std::ptr::null_mut()),
-                                    decoder.cuda_stream().unwrap_or(std::ptr::null_mut()),
-                                    settings.nv_vsr_scale,
-                                );
+                                let ctx =
+                                    decoder.cuda_context().unwrap_or(std::ptr::null_mut());
+                                let stream =
+                                    decoder.cuda_stream().unwrap_or(std::ptr::null_mut());
+                                vsr_inited = up.init(&frame, ctx, stream, settings.nv_vsr_scale);
                                 session
                                     .telemetry
                                     .vsr_active
@@ -1617,84 +1783,222 @@ struct MediaTimings {
                                 if let Some(ms) = up.engine_load_ms() {
                                     tracing::info!("VSR: Engine in {ms} ms geladen");
                                 }
+                                if let Some(gpu) = &gpu {
+                                    if gpu.kind == GpuPathKind::CudaVsrInterop {
+                                        if vsr_inited {
+                                            match CudaD3d11Interop::new(
+                                                ctx,
+                                                stream,
+                                                gpu.sink.rgba_texture(),
+                                            ) {
+                                                Ok(i) => interop = Some(i),
+                                                Err(err) => tracing::error!(
+                                                    "CUDA-D3D11-Interop fehlgeschlagen: {err}"
+                                                ),
+                                            }
+                                        } else if decoder_raw {
+                                            // VSR nicht aktiv (kein SDK?) — im
+                                            // Raw-Modus gäbe es keine darstell-
+                                            // baren Frames: Decoder einmalig auf
+                                            // CPU-Transfer-Pfad umgebaut (Frames
+                                            // laufen dann als submit_cpu weiter).
+                                            tracing::warn!(
+                                                "VSR nicht aktiv ({:?}) — Decoder-Wechsel auf CPU-Transfer-Pfad",
+                                                up.last_error().unwrap_or("?")
+                                            );
+                                            rebuild_decoder_cpu = true;
+                                        }
+                                    }
+                                }
                             }
-                            let t1 = std::time::Instant::now();
-                            let nv12_res = nv12_from_planes(&frame);
-                            t.nv12_copy_us += t1.elapsed().as_micros() as u64;
-                            match nv12_res {
-                                Ok(nv12) => {
-                                    latest = Some((
-                                        nv12,
-                                        frame.pts,
-                                        frame.duration,
-                                        frame.frames_lost,
-                                        frame.recovered,
-                                    ));
+                            if rebuild_decoder_cpu {
+                                break; // Decoder-Wechsel außerhalb der Schleife.
+                            }
+                            if frame.memory == FrameMemory::Cpu {
+                                let t1 = std::time::Instant::now();
+                                let nv12_res = nv12_from_planes(&frame);
+                                t.nv12_copy_us += t1.elapsed().as_micros() as u64;
+                                match nv12_res {
+                                    Ok(nv12) => {
+                                        latest = Some(Latest::Cpu(
+                                            nv12,
+                                            frame.pts,
+                                            frame.duration,
+                                            frame.frames_lost,
+                                            frame.recovered,
+                                        ));
+                                    }
+                                    Err(err) => {
+                                        tracing::error!("NV12-Kopie fehlgeschlagen: {err:?}")
+                                    }
                                 }
-                                Err(err) => {
-                                    tracing::error!("NV12-Kopie fehlgeschlagen: {err:?}")
-                                }
+                            } else {
+                                latest = Some(Latest::Raw(frame));
                             }
                         }
                         Ok(None) => {} // vor dem ersten IDR noch kein Frame
                         Err(err) => tracing::warn!("Decode-Fehler: {err:?}"),
                     }
                 }
-                let Some((nv12, pts, duration, frames_lost, recovered)) = latest else {
+                if rebuild_decoder_cpu {
+                    decoder_raw = false;
+                    vsr_inited = false;
+                    decoder = make_decoder(false).ok();
+                    if decoder.is_none() {
+                        tracing::error!("Decoder-Wechsel auf CPU-Pfad fehlgeschlagen");
+                    }
+                    continue;
+                }
+                let gpu_handle = session.gpu.clone();
+                let gpu_active = gpu_handle.as_ref().is_some_and(|g| !g.is_lost());
+                let Some(latest) = latest else {
                     continue;
                 };
-                let vsr_used = if vsr_inited {
-                    let t2 = std::time::Instant::now();
-                    let used = vsr.as_mut().is_some_and(|up| {
-                        up.process_frame_nv12(
-                            &nv12.y_plane(),
-                            &nv12.uv_plane(),
-                            nv12.y_stride,
-                            nv12.uv_stride,
-                            nv12.width,
-                            nv12.height,
-                            pts,
-                            duration,
-                            frames_lost,
-                            recovered,
-                            &mut vsr_buf,
-                        )
-                    });
-                    t.vsr_us += t2.elapsed().as_micros() as u64;
-                    used
-                } else {
-                    false
-                };
-                let out = if vsr_used {
-                    // Zero-Copy: der VSR-Output ist bereits NV12-layoutet
-                    // (Y@0 + UV@pitch*h, contiguous) — Buffer ÜBERNEHMEN statt
-                    // 12 MB zu kopieren.
-                    let t3 = std::time::Instant::now();
-                    let moved = NV12Frame::from_parts(
-                        vsr_buf.width(),
-                        vsr_buf.height(),
-                        vsr_buf.pitch(),
-                        vsr_buf.pitch(),
-                        vsr_buf.clone().into_data(),
-                    );
-                    t.out_copy_us += t3.elapsed().as_micros() as u64;
-                    match moved {
-                        Ok(out) => out,
-                        Err(err) => {
-                            tracing::error!("VSR-Output-Übernahme fehlgeschlagen: {err:?}");
+                match latest {
+                    Latest::Raw(frame) => {
+                        // GPU-Pfad: VSR→Interop (CUDA) oder Device-interne
+                        // Kopie (D3D11VA). Ein RAW-Frame OHNE GPU-Pfad (nur
+                        // nach Sink-Verlust möglich) ist CPU-seitig nicht
+                        // darstellbar und wird übersprungen.
+                        let mut presented_gpu = false;
+                        if vsr_inited && interop.is_some() {
+                            let t2 = std::time::Instant::now();
+                            let ok = vsr.as_mut().is_some_and(|up| {
+                                up.process_frame_gpu(
+                                    frame.planes[0].as_ptr() as *const std::os::raw::c_void,
+                                    frame.planes[0].stride,
+                                    frame.planes[1].as_ptr() as *const std::os::raw::c_void,
+                                    frame.planes[1].stride,
+                                    frame.width,
+                                    frame.height,
+                                    frame.pts,
+                                    frame.duration,
+                                    frame.frames_lost,
+                                    frame.recovered,
+                                )
+                            });
+                            t.vsr_us += t2.elapsed().as_micros() as u64;
+                            if ok {
+                                if let (Some(up), Some(inter), Some(gpu)) = (
+                                    vsr.as_ref(),
+                                    interop.as_mut(),
+                                    gpu_handle.as_ref(),
+                                ) {
+                                    if let Some(src_img) = up.gpu_rgba_image() {
+                                        let guard = gpu.interop_lock();
+                                        // SAFETY: src_img ist das SDK-GPU-Image
+                                        // (Decoder-Kontext, synchronisiert);
+                                        // D3D11 nutzt die Textur nicht
+                                        // (interop_lock gehalten).
+                                        let r = unsafe { inter.write_from(src_img) };
+                                        drop(guard);
+                                        if r.is_ok() {
+                                            gpu.submit_rgba_ready();
+                                            presented_gpu = true;
+                                        } else {
+                                            tracing::warn!(
+                                                "Interop-Schreibvorgang fehlgeschlagen: {:?}",
+                                                r.err()
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        } else if let FrameMemory::D3d11Texture {
+                            texture,
+                            subresource,
+                        } = frame.memory
+                        {
+                            if let Some(gpu) = gpu_handle.as_ref() {
+                                // SAFETY: Textur stammt aus dem Decoder
+                                // (gleiches Device wie der Sink); die Kopie im
+                                // Render-Thread läuft in Einreihenfolge vor
+                                // jeder späteren Decode-Nutzung derselben
+                                // Surface (DecodedFrame-Vertrag).
+                                unsafe { gpu.submit_d3d11(texture, subresource) };
+                                presented_gpu = true;
+                            }
+                        }
+                        _ = presented_gpu;
+                        t.frames += 1;
+                    }
+                    Latest::Cpu(nv12, pts, duration, frames_lost, recovered) => {
+                        // VSR-CPU-Pfad nur OHNE GPU-Sink (mit Sink läuft VSR
+                        // als Interop; Cpu-Frames im Sink-Modus sind Software-
+                        // Fallback und werden direkt hochgeladen).
+                        let vsr_used = if vsr_inited && gpu_handle.is_none() {
+                            let t2 = std::time::Instant::now();
+                            let used = vsr.as_mut().is_some_and(|up| {
+                                up.process_frame_nv12(
+                                    &nv12.y_plane(),
+                                    &nv12.uv_plane(),
+                                    nv12.y_stride,
+                                    nv12.uv_stride,
+                                    nv12.width,
+                                    nv12.height,
+                                    pts,
+                                    duration,
+                                    frames_lost,
+                                    recovered,
+                                    &mut vsr_buf,
+                                )
+                            });
+                            t.vsr_us += t2.elapsed().as_micros() as u64;
+                            used
+                        } else {
+                            false
+                        };
+                        let out = if vsr_used {
+                            // Zero-Copy: der VSR-Output ist bereits NV12-
+                            // layoutet (Y@0 + UV@pitch*h, contiguous) — Buffer
+                            // ÜBERNEHMEN statt 12 MB zu kopieren.
+                            let t3 = std::time::Instant::now();
+                            let moved = NV12Frame::from_parts(
+                                vsr_buf.width(),
+                                vsr_buf.height(),
+                                vsr_buf.pitch(),
+                                vsr_buf.pitch(),
+                                vsr_buf.clone().into_data(),
+                            );
+                            t.out_copy_us += t3.elapsed().as_micros() as u64;
+                            match moved {
+                                Ok(out) => out,
+                                Err(err) => {
+                                    tracing::error!(
+                                        "VSR-Output-Übernahme fehlgeschlagen: {err:?}"
+                                    );
+                                    nv12
+                                }
+                            }
+                        } else {
                             nv12
+                        };
+                        t.frames += 1;
+                        // GPU-Sink aktiv → Upload-Pfad; sonst klassischer
+                        // Presenter (GPUI-Atlas; Fallback nach Device-Lost).
+                        match gpu_handle.as_ref() {
+                            Some(gpu) if gpu_active => gpu.submit_cpu(out),
+                            _ => session.presenter.set_frame(out),
                         }
                     }
-                } else {
-                    nv12
-                };
-                t.frames += 1;
+                }
                 if t.frames % 300 == 0 {
                     let n = t.frames.max(1) as f64;
                     let snap = session.presenter.stats();
                     let slot_dropped = session.shared_video_slot().dropped();
+                    let sink_line = gpu_handle.as_ref().map(|g| {
+                        let s = g.stats_values();
+                        format!(
+                            " | Sink: presented {}, uploads {}, d3d11-copies {}, rgba {}, drops {}",
+                            s.frames_presented,
+                            s.cpu_uploads,
+                            s.d3d11_copies,
+                            s.rgba_presents,
+                            s.frames_dropped
+                        )
+                    });
                     tracing::info!(
-                        "Media-Pipeline (Ø über {} Frames, {} Samples): decode {:.2} ms, nv12-copy {:.2} ms, vsr {:.2} ms, out-take {:.2} ms — Summe {:.2} ms/Frame (Budget 16,7) | Presenter Δ: gen {}, präsentiert {}, UI-Drops {}, Slot-Drops {}",
+                        "Media-Pipeline (Ø über {} Frames, {} Samples): decode {:.2} ms, nv12-copy {:.2} ms, vsr {:.2} ms, out-take {:.2} ms — Summe {:.2} ms/Frame (Budget 16,7) | Presenter Δ: gen {}, präsentiert {}, UI-Drops {}, Slot-Drops {}{}",
                         t.frames, t.samples,
                         t.decode_us as f64 / n / 1000.0,
                         t.nv12_copy_us as f64 / n / 1000.0,
@@ -1705,13 +2009,13 @@ struct MediaTimings {
                         snap.frames_presented.saturating_sub(prev_presented),
                         snap.frames_dropped.saturating_sub(prev_dropped),
                         slot_dropped.saturating_sub(prev_slot_dropped),
+                        sink_line.unwrap_or_default(),
                     );
                     prev_presented = snap.frames_presented;
                     prev_generated = snap.frames_generated;
                     prev_dropped = snap.frames_dropped;
                     prev_slot_dropped = slot_dropped;
                 }
-                session.presenter.set_frame(out);
             }
         }
 

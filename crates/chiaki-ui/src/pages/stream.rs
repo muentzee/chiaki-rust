@@ -87,16 +87,25 @@ pub fn page(
 
     // State-Daten holen (kurze Borrows; danach folgt der Elementbau mit
     // cx.listener, das &mut cx braucht).
-    let (presenter, snap, keyboard_focus, focus) = {
+    let (presenter, gpu, snap, keyboard_focus, focus) = {
         let state = cx.global::<StreamUiState>();
         (
             state.presenter.clone(),
+            state.gpu.clone(),
             state.snapshot(),
             state.keyboard.as_ref().map(|k| k.focus.clone()),
             state.focus.clone(),
         )
     };
-    let image = presenter.as_ref().and_then(|p| p.take_image(window));
+    // GPU-Videopfad: das D3D11-Sink-Fenster zeigt das Bild UNTER der gpui-
+    // Surface — der Video-Bereich wird transparent gemalt (nicht mal gepixelt)
+    // und der Presenter wird nicht angefasst (UI-Kosten ~0 pro Videoframe).
+    let gpu_mode = snap.stage == Stage::Streaming && gpu.as_ref().is_some_and(|g| !g.is_lost());
+    let image = if gpu_mode {
+        None
+    } else {
+        presenter.as_ref().and_then(|p| p.take_image(window))
+    };
 
     // -- Handler (jeweils kurz &mut cx) -------------------------------------
 
@@ -174,42 +183,51 @@ pub fn page(
 
     // -- Elementbaum ---------------------------------------------------------
 
-    // Video-Fläche (immer da; Connecting-Overlay liegt darüber).
-    let video_area = div()
+    // Video-Fläche (immer da; Connecting-Overlay liegt darüber). Im GPU-Modus
+    // KEIN Hintergrund und KEIN Element — ungepixelte Bereiche der gpui-
+    // Surface sind transparent (DComp, PREMULTIPLIED), das Video-Fenster
+    // dahinter scheint durch; Klicks (Doppelklick = Fullscreen) landen in der
+    // gpui-Fläche und behalten damit den Input im UI-Fenster.
+    let mut video_area = div()
         .id("stream-video")
         .absolute()
         .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .overflow_hidden()
-        .bg(gpui::black())
-        .on_click(on_video_click)
-        .child(match image {
-            Some(image) => VideoSurface {
-                image,
-                mode: snap.zoom,
-            }
-            .into_any_element(),
-            None => div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_size(px(theme::SIZE_HEADLINE))
-                        .text_color(theme::TEXT_SECONDARY)
-                        .child("Kein Video-Signal"),
-                )
-                .child(
-                    div()
-                        .text_size(px(theme::SIZE_CAPTION))
-                        .text_color(theme::TEXT_DISABLED)
-                        .child("Warte auf Frames der Session…".to_string()),
-                )
+        .on_click(on_video_click);
+    if gpu_mode {
+        video_area = video_area.child(div());
+    } else {
+        video_area = video_area
+            .flex()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .bg(gpui::black())
+            .child(match image {
+                Some(image) => VideoSurface {
+                    image,
+                    mode: snap.zoom,
+                }
                 .into_any_element(),
-        });
+                None => div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(theme::SIZE_HEADLINE))
+                            .text_color(theme::TEXT_SECONDARY)
+                            .child("Kein Video-Signal"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(theme::SIZE_CAPTION))
+                            .text_color(theme::TEXT_DISABLED)
+                            .child("Warte auf Frames der Session…".to_string()),
+                    )
+                    .into_any_element(),
+            });
+    }
 
     // Connecting-Sequence (Vollbild-Overlay, solange nicht gestreamt wird).
     let connecting_overlay = if snap.stage != Stage::Streaming {
@@ -287,11 +305,19 @@ pub fn page(
         );
     }
 
+    // Root-Hintergrund im GPU-Modus TRANSPARENT (gpui::transparent statt
+    // theme::BG) — sonst würde die opake Flächenfarbe das Video-Fenster
+    // unter der gpui-Surface verdecken.
+    let root_bg = if gpu_mode {
+        gpui::transparent_black()
+    } else {
+        theme::BG
+    };
     div()
         .id("stream-root")
         .size_full()
         .relative()
-        .bg(theme::BG)
+        .bg(root_bg)
         .text_color(theme::TEXT_PRIMARY)
         .key_context("Stream")
         .track_focus(&focus)

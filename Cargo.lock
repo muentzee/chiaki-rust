@@ -1134,11 +1134,13 @@ dependencies = [
 name = "chiaki-render"
 version = "1.10.0"
 dependencies = [
+ "chiaki-core",
  "chiaki-media",
  "gpui",
  "image",
  "thiserror 2.0.20",
  "tracing",
+ "tracing-subscriber",
  "windows 0.58.0",
 ]
 

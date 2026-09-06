@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chiaki_render::gpu_sink::GpuSinkHandle;
 use chiaki_render::nv12::NV12Frame;
 use chiaki_render::presenter::VideoPresenter;
 
@@ -33,17 +34,20 @@ pub const HEIGHT: u32 = 720;
 /// 1080p-Profil, damit das HUD „echte" Werte zeigt.
 const BYTES_PER_SEC: u64 = 15_000_000 / 8;
 
-/// Startet den Fake-Producer-Thread (endet über `stop`).
+/// Startet den Fake-Producer-Thread (endet über `stop`). Mit `gpu` werden die
+/// Frames in den D3D11-Sink hochgeladen (submit_cpu — GPU-Pfad-Test ohne
+/// Konsole), sonst in den Presenter.
 pub fn start(
     presenter: VideoPresenter,
     telemetry: Arc<StreamTelemetry>,
     stop: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
     pin_requested: Option<Arc<AtomicBool>>,
+    gpu: Option<GpuSinkHandle>,
 ) {
     let spawned = std::thread::Builder::new()
         .name("chiaki-ui-fake-stream".into())
-        .spawn(move || run(presenter, telemetry, stop, connected, pin_requested));
+        .spawn(move || run(presenter, telemetry, stop, connected, pin_requested, gpu));
     if let Err(err) = spawned {
         tracing::error!("Fake-Stream-Thread konnte nicht gestartet werden: {err}");
     }
@@ -55,6 +59,7 @@ fn run(
     stop: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
     pin_requested: Option<Arc<AtomicBool>>,
+    gpu: Option<GpuSinkHandle>,
 ) {
     let started = Instant::now();
     let mut pin_sent = false;
@@ -87,7 +92,11 @@ fn run(
         // des echten Media-Threads).
         let t = (frame_index % (60 * 8)) as f32 / 60.0; // 8-s-Zyklus
         let frame = test_pattern(t, frame_index);
-        presenter.set_frame(frame);
+        // GPU-Sink vorhanden (settings/video_output) → Upload-Pfad testen.
+        match &gpu {
+            Some(g) if !g.is_lost() => g.submit_cpu(frame),
+            _ => presenter.set_frame(frame),
+        };
 
         // Telemetrie: gemessene Bitrate (bytes/s → Bytes pro Frame), Frames,
         // gelegentlich ein verlorener Frame, Audio-Füllstand, RTT, Decoder.

@@ -19,7 +19,9 @@
 
 use std::ptr::{self, NonNull};
 
-use chiaki_media::{Decoder, FrameBuf, FrameFormat, HwBackend, Plane, VsrUpscaler};
+use chiaki_media::{
+    Decoder, FrameBuf, FrameFormat, FrameMemory, HwBackend, Plane, VsrUpscaler,
+};
 
 /// Synthetischer NV12-Frame (Gradient + neutrales Chroma) mit echten
 /// per-Plane-Pointern (Y und UV getrennt — wie der Decoder sie liefert).
@@ -54,6 +56,7 @@ fn synthetic_nv12_frame(w: u32, h: u32) -> (Vec<u8>, chiaki_media::DecodedFrame)
         duration: 1.0 / 60.0,
         frames_lost: 2,
         recovered: false,
+        memory: FrameMemory::Cpu,
     };
     (buf, frame)
 }

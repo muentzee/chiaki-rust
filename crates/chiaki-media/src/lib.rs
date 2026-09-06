@@ -19,13 +19,16 @@
 //!   und Mikrofon ([`audio::AudioInput`], Capture → Opus-40-Byte-Frames)
 
 pub mod audio;
+pub mod cuda_d3d11;
 pub mod decoder;
 pub mod ffmpeg;
 pub mod opus;
 pub mod vsr;
 
 pub use audio::{AudioInput, AudioOutput};
-pub use decoder::{nv12_aligned_height, DecodedFrame, Decoder, FrameFormat, HwBackend, Plane};
+pub use decoder::{
+    nv12_aligned_height, DecodedFrame, Decoder, FrameFormat, FrameMemory, HwBackend, Plane,
+};
 pub use vsr::{FrameBuf, VsrUpscaler};
 
 #[cfg(test)]

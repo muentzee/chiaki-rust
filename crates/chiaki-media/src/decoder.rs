@@ -72,6 +72,24 @@ pub enum FrameFormat {
     Nv12 = sys::AV_PIX_FMT_NV12,
 }
 
+/// Speicherort der Frame-Daten (GPU-Pfad: [`FrameMemory::CudaDevice`]/
+/// [`FrameMemory::D3d11Texture`] — dann NICHT in Systemspeicher transferiert;
+/// siehe [`crate::decoder::Decoder::with_raw_hw_output`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameMemory {
+    /// `planes[0..1]` zeigen in Systemspeicher (klassischer Pfad).
+    Cpu,
+    /// `planes[0..1]` sind CUDA-Device-Pointer (Y, UV) — NVDEC-CUDA-Raw-Output
+    /// (`AV_PIX_FMT_CUDA`). Nur im Decoder-Kontext gültig (VSR/Kopien).
+    CudaDevice,
+    /// `data[0]` = ID3D11Texture2D* (NV12-Array), `subresource` = Array-Index
+    /// (FFmpeg: `data[1] as intptr_t`) — D3D11VA-Raw-Output.
+    D3d11Texture {
+        texture: *mut std::os::raw::c_void,
+        subresource: u32,
+    },
+}
+
 /// Eine Bild-Ebene: echter Pointer + Zeilenabstand (Bytes).
 ///
 /// Bewusst roh (siehe Moduldokumentation): der Renderer braucht die echten
@@ -96,14 +114,18 @@ impl Plane {
     }
 }
 
-/// Dekodierter Frame — immer NV12 (siehe Moduldokumentation).
+/// Dekodierter Frame — CPU-Pfad: immer NV12 (siehe Moduldokumentation);
+/// GPU-Pfad ([`FrameMemory::CudaDevice`]/[`FrameMemory::D3d11Texture`]):
+/// Daten bleiben auf der GPU (raw HW-Output).
 #[derive(Debug, Clone, Copy)]
 pub struct DecodedFrame {
     pub width: u32,
     pub height: u32,
     pub format: FrameFormat,
     /// `[0]` = Y, `[1]` = interleaved UV (NV12). Echte Pointer, siehe
-    /// aligned-height-Hinweis oben.
+    /// aligned-height-Hinweis oben. Bei [`FrameMemory::CudaDevice`] sind es
+    /// CUDA-Device-Pointer; bei [`FrameMemory::D3d11Texture`] tragen sie die
+    /// Textur-Pointer (siehe `memory`).
     pub planes: [Plane; 2],
     /// `(data[1] - data[0]) / linesize[0]` — kann > height sein (NVDEC-Alignment,
     /// z. B. 1088 bei 1080p). Chroma-Zeilenhöhe ist `aligned_height / 2`.
@@ -117,6 +139,8 @@ pub struct DecodedFrame {
     pub frames_lost: i32,
     /// Frame nach FEC-Recovery (C: `frame->decode_error_flags |= 1`).
     pub recovered: bool,
+    /// Speicherort der Frame-Daten (CPU-Pfad: [`FrameMemory::Cpu`]).
+    pub memory: FrameMemory,
 }
 
 /// NV12-aligned-height aus den ECHTEN Pointer-Differenzen berechnen
@@ -243,6 +267,20 @@ impl SyntheticTiming {
     }
 }
 
+/// Optionen für den GPU-Pfad ([`Decoder::new_opts`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DecoderOpts {
+    /// HW-Frames NICHT in Systemspeicher transferieren — [`DecodedFrame`]
+    /// erhält CUDA-Device-Pointer (Backend Cuda) bzw. die D3D11-NV12-Textur
+    /// mit Array-Index (Backend D3D11Va). Software-Pfade liefern weiterhin CPU.
+    pub raw_hw_output: bool,
+    /// Externes D3D11-Device (ID3D11Device*) + Immediate-Context — D3D11VA
+    /// dekodiert dann auf DEMSELBEN Device wie der GPU-Sink (Voraussetzung
+    /// für geräteinternes CopySubresourceRegion). Nur mit Backend D3D11Va.
+    pub d3d11_device: *mut std::os::raw::c_void,
+    pub d3d11_device_context: *mut std::os::raw::c_void,
+}
+
 /// FFmpeg-Videodekoder (H264/H265, HW via NVDEC/D3D11VA/Vulkan oder Software).
 ///
 /// Nicht `Sync` — FFmpeg-Codec-Kontexte sind nicht threadsicher; der C-Client
@@ -254,6 +292,10 @@ pub struct Decoder {
     hw_device_ctx: *mut sys::AVBufferRef,
     hw_pix_fmt: c_int,
     hw_backend: Option<HwBackend>,
+    /// Aufgelöste Pseudoformate (per Name, siehe `new_opts`).
+    cuda_pix_fmt: c_int,
+    d3d11_pix_fmt: c_int,
+    opts: DecoderOpts,
     /// Zwei rotierende AVFrames — Port des frame_last/frame-Ping-Pongs aus
     /// `chiaki_ffmpeg_decoder_pull_frame` (immer nur der letzte Frame lebt).
     frames: [NonNull<sys::AVFrame>; 2],
@@ -283,8 +325,29 @@ impl Decoder {
     /// `max_fps` stammt aus dem VideoProfile (C: `connect_info.video_profile.max_fps`)
     /// und treibt das synthetische Timing; 0 wird wie im C als 60 interpretiert.
     pub fn new(codec: Codec, hw_backend: HwBackend, max_fps: u32) -> ChiakiResult<Decoder> {
+        Self::new_opts(codec, hw_backend, max_fps, DecoderOpts::default())
+    }
+
+    /// Wie [`Decoder::new`] mit GPU-Pfad-Optionen (raw HW-Output, externes
+    /// D3D11-Device für D3D11VA).
+    pub fn new_opts(
+        codec: Codec,
+        hw_backend: HwBackend,
+        max_fps: u32,
+        opts: DecoderOpts,
+    ) -> ChiakiResult<Decoder> {
         let lib = ffmpeg::init()?;
         let api = lib.api();
+
+        // HW-Pseudoformate zur Laufzeit per Name auflösen (kein Enum-Pinning).
+        let cuda_pix_fmt = unsafe {
+            let name = b"cuda\0";
+            (api.av_get_pix_fmt)(name.as_ptr() as *const std::os::raw::c_char)
+        };
+        let d3d11_pix_fmt = unsafe {
+            let name = b"d3d11\0";
+            (api.av_get_pix_fmt)(name.as_ptr() as *const std::os::raw::c_char)
+        };
 
         if codec.is_hdr() {
             // Der DecodedFrame-Vertrag ist NV12 (8 bit). HDR (H265 + P010LE/
@@ -335,6 +398,7 @@ impl Decoder {
                     av_codec,
                     codec_ctx,
                     backend,
+                    opts,
                     &mut hw_device_ctx,
                     &mut hw_pix_fmt,
                 ) {
@@ -420,6 +484,9 @@ impl Decoder {
                 hw_device_ctx,
                 hw_pix_fmt,
                 hw_backend: hw_used,
+                cuda_pix_fmt,
+                d3d11_pix_fmt,
+                opts,
                 frames: [frame0, frame1],
                 scratch_slot: 0,
                 transfer_frame,
@@ -436,11 +503,17 @@ impl Decoder {
     }
 
     /// C: HW-Config-Suche + `av_hwdevice_ctx_create` + `ctx->hw_device_ctx = av_buffer_ref(...)`.
+    ///
+    /// D3D11VA-Sonderweg mit externem Device (GPU-Pfad): `av_hwdevice_ctx_alloc`
+    /// → `AVD3D11VADeviceContext` mit Sink-Device/Context füllen →
+    /// `av_hwdevice_ctx_init` — FFmpeg dekodiert dann auf DEMSELBEN D3D11-Device
+    /// wie der GPU-Sink (Voraussetzung für geräteinternes CopySubresourceRegion).
     fn setup_hw_device(
         api: &sys::Api,
         av_codec: *const sys::AVCodec,
         codec_ctx: NonNull<sys::AVCodecContext>,
         backend: HwBackend,
+        opts: DecoderOpts,
         hw_device_ctx: &mut *mut sys::AVBufferRef,
         hw_pix_fmt: &mut c_int,
     ) -> Result<(), String> {
@@ -469,8 +542,40 @@ impl Decoder {
                 i += 1;
             }
 
-            if hw_device_ctx.is_null()
-                && (api.av_hwdevice_ctx_create)(
+            if hw_device_ctx.is_null() {
+                let external_d3d11 = backend == HwBackend::D3D11Va && !opts.d3d11_device.is_null();
+                if external_d3d11 {
+                    // Externes Device: alloc → hwctx füllen → init.
+                    let dev_ref = (api.av_hwdevice_ctx_alloc)(sys::AV_HWDEVICE_TYPE_D3D11VA);
+                    if dev_ref.is_null() {
+                        return Err("av_hwdevice_ctx_alloc failed".to_string());
+                    }
+                    let dev = (*dev_ref).data as *mut sys::AVHWDeviceContext;
+                    if dev.is_null() {
+                        let mut tmp = dev_ref;
+                        (api.av_buffer_unref)(&mut tmp);
+                        return Err("hwdevice context data is null".to_string());
+                    }
+                    let hwctx = (*dev).hwctx as *mut sys::AVD3D11VADeviceContext;
+                    if hwctx.is_null() {
+                        let mut tmp = dev_ref;
+                        (api.av_buffer_unref)(&mut tmp);
+                        return Err("D3D11VA hwctx is null".to_string());
+                    }
+                    *hwctx = sys::AVD3D11VADeviceContext {
+                        device: opts.d3d11_device,
+                        device_context: opts.d3d11_device_context,
+                        lock: None,
+                        unlock: None,
+                        lock_ctx: std::ptr::null_mut(),
+                    };
+                    if (api.av_hwdevice_ctx_init)(dev_ref) < 0 {
+                        let mut tmp = dev_ref;
+                        (api.av_buffer_unref)(&mut tmp);
+                        return Err("av_hwdevice_ctx_init (external D3D11 device) failed".to_string());
+                    }
+                    *hw_device_ctx = dev_ref;
+                } else if (api.av_hwdevice_ctx_create)(
                     hw_device_ctx,
                     dev_type,
                     ptr::null(),
@@ -480,6 +585,7 @@ impl Decoder {
                 {
                     return Err("Failed to create hwdevice context".to_string());
                 }
+            }
             let ctx_ref = (api.av_buffer_ref)(*hw_device_ctx);
             if ctx_ref.is_null() {
                 return Err("av_buffer_ref failed".to_string());
@@ -590,9 +696,18 @@ impl Decoder {
             }
 
             // --- HW-Frame in Systemspeicher übertragen (NVDEC aligned height bleibt
-            // über die echten Plane-Pointer/aligned_height sichtbar) ---
+            // über die echten Plane-Pointer/aligned_height sichtbar). Im RAW-Modus
+            // (GPU-Pfad) bleibt der Frame auf der GPU: CUDA → Device-Pointer,
+            // D3D11VA → NV12-Array-Textur + Index (siehe build_decoded_frame). ---
             let src = &*self.frames[slot].as_ptr();
-            if self.hw_backend.is_some() && src.format == self.hw_pix_fmt {
+            let src_is_cuda_raw = self.opts.raw_hw_output
+                && src.format == self.cuda_pix_fmt
+                && self.cuda_pix_fmt >= 0;
+            let src_is_d3d11_raw = self.opts.raw_hw_output
+                && src.format == self.d3d11_pix_fmt
+                && self.d3d11_pix_fmt >= 0;
+            let raw_hw = src_is_cuda_raw || src_is_d3d11_raw;
+            if self.hw_backend.is_some() && src.format == self.hw_pix_fmt && !raw_hw {
                 let tf = self.transfer_frame.as_ptr();
                 (api.av_frame_unref)(tf);
                 (*tf).format = sys::AV_PIX_FMT_NV12;
@@ -614,12 +729,13 @@ impl Decoder {
 
             // Roh-Pointer (kein &self-Borrow), damit build_decoded_frame &mut self
             // für den sws-Puffer nehmen darf.
-            let frame_ptr: *const sys::AVFrame =
-                if self.is_hw() && (*self.frames[slot].as_ptr()).format == self.hw_pix_fmt {
-                    self.transfer_frame.as_ptr()
-                } else {
-                    self.frames[slot].as_ptr()
-                };
+            let frame_ptr: *const sys::AVFrame = if raw_hw {
+                self.frames[slot].as_ptr()
+            } else if self.is_hw() && (*self.frames[slot].as_ptr()).format == self.hw_pix_fmt {
+                self.transfer_frame.as_ptr()
+            } else {
+                self.frames[slot].as_ptr()
+            };
             let out = self.build_decoded_frame(frame_ptr, lost, recovered)?;
             Ok(Some(out))
         }
@@ -695,7 +811,6 @@ impl Decoder {
         frames_lost: i32,
         recovered: bool,
     ) -> ChiakiResult<DecodedFrame> {
-        let api = self.lib.api();
         let frame = &*frame_ptr;
         let width = frame.width.max(0) as u32;
         let height = frame.height.max(0) as u32;
@@ -704,7 +819,135 @@ impl Decoder {
             return Err(ChiakiError::Unknown);
         }
 
-        let (planes, aligned_height) = match frame.format {
+        let (planes, aligned_height, memory) = if frame.format == self.cuda_pix_fmt
+            && self.cuda_pix_fmt >= 0
+            && self.opts.raw_hw_output
+        {
+            // NVDEC-CUDA-Raw: data[0]/data[1] sind CUDA-Device-Pointer (Y/UV),
+            // linesize[0] = Pitch (Referenz: C++ vsrupscaler.cpp, NVCV_MEM_GPU-
+            // Views über data[0]/data[1]). aligned height wie bei CPU-Frames
+            // aus der Pointer-Differenz (1080 → 1088-Alignment bleibt sichtbar).
+            let stride0 = frame.linesize[0].max(0) as usize;
+            let stride1 = if frame.linesize[1] != 0 {
+                frame.linesize[1].max(0) as usize
+            } else {
+                stride0
+            };
+            let p0 = frame.data[0];
+            let p1 = frame.data[1];
+            if p0.is_null() || p1.is_null() || stride0 == 0 {
+                tracing::error!(
+                    "CUDA raw frame has unusable plane layout (data[0]={:p}, data[1]={:p}, pitch={})",
+                    p0,
+                    p1,
+                    stride0
+                );
+                return Err(ChiakiError::Unknown);
+            }
+            let aligned = nv12_aligned_height(p0 as usize, p1 as usize, stride0)
+                .ok_or_else(|| {
+                    tracing::error!("CUDA raw plane layout unreadable");
+                    ChiakiError::Unknown
+                })?;
+            (
+                [
+                    Plane {
+                        data: NonNull::new_unchecked(p0),
+                        stride: stride0,
+                    },
+                    Plane {
+                        data: NonNull::new_unchecked(p1),
+                        stride: stride1,
+                    },
+                ],
+                aligned,
+                FrameMemory::CudaDevice,
+            )
+        } else if frame.format == self.d3d11_pix_fmt
+            && self.d3d11_pix_fmt >= 0
+            && self.opts.raw_hw_output
+        {
+            // D3D11VA-Raw: data[0] = ID3D11Texture2D* (NV12-Array), data[1] =
+            // Array-Index als intptr_t (FFmpeg-Vertrag). Die planes tragen die
+            // Textur-Pointer als Opaque-Werte (Renderer liest `memory`).
+            let texture = frame.data[0];
+            let subresource = (frame.data[1] as usize) as u32;
+            if texture.is_null() {
+                tracing::error!("D3D11VA raw frame has null texture pointer");
+                return Err(ChiakiError::Unknown);
+            }
+            let stride0 = frame.linesize[0].max(0) as usize;
+            (
+                [
+                    Plane {
+                        data: NonNull::new_unchecked(texture),
+                        stride: stride0,
+                    },
+                    Plane {
+                        data: NonNull::new_unchecked(frame.data[1]),
+                        stride: stride0,
+                    },
+                ],
+                height,
+                FrameMemory::D3d11Texture {
+                    texture: texture.cast(),
+                    subresource,
+                },
+            )
+        } else {
+            let (planes, aligned_height) = self.build_cpu_planes(frame, width, height)?;
+            (planes, aligned_height, FrameMemory::Cpu)
+        };
+
+        // C: chiaki_ffmpeg_frame_get_timing (Fallback-Kette pkt_timebase →
+        // ctx time_base → 1/1e6; best_effort_timestamp → pts → 0). Liegt keine
+        // Frame-Dauer vor, greift die synthetische Dauer (C: pull_frame-Override).
+        let ctx = &*self.codec_ctx.as_ptr();
+        let mut time_base = ctx.pkt_timebase;
+        if !time_base.is_valid() {
+            time_base = ctx.time_base;
+        }
+        if !time_base.is_valid() {
+            time_base = sys::AVRational::new(1, 1_000_000);
+        }
+        let mut pts = frame.best_effort_timestamp;
+        if pts == sys::AV_NOPTS_VALUE {
+            pts = frame.pts;
+        }
+        if pts == sys::AV_NOPTS_VALUE {
+            pts = 0;
+        }
+        let pts_secs = time_base.q2d() * pts as f64;
+        let duration = if frame.duration > 0 {
+            time_base.q2d() * frame.duration as f64
+        } else {
+            self.timing.duration_secs()
+        };
+
+        Ok(DecodedFrame {
+            width,
+            height,
+            format: FrameFormat::Nv12,
+            planes,
+            aligned_height,
+            pts: pts_secs,
+            duration,
+            frames_lost,
+            recovered,
+            memory,
+        })
+    }
+
+    /// CPU-Planes: NV12-Frame-Pool-Pointer oder YUV420P→NV12 via swscale
+    /// (Software-Pfad, Renderer-Vertrag "immer NV12 mit 2 Planes").
+    unsafe fn build_cpu_planes(
+        &mut self,
+        frame: &sys::AVFrame,
+        width: u32,
+        height: u32,
+    ) -> ChiakiResult<([Plane; 2], u32)> {
+        let api = self.lib.api();
+        match frame.format {
             sys::AV_PIX_FMT_NV12 => {
                 let stride0 = frame.linesize[0].max(0) as usize;
                 let stride1 = if frame.linesize[1] != 0 {
@@ -719,14 +962,14 @@ impl Decoder {
                 let aligned =
                     nv12_aligned_height(p0 as usize, p1 as usize, stride0).ok_or_else(|| {
                         tracing::error!(
-                        "NV12 plane layout unreadable (data[0]={:p}, data[1]={:p}, linesize[0]={})",
-                        p0,
-                        p1,
-                        stride0
-                    );
+                            "NV12 plane layout unreadable (data[0]={:p}, data[1]={:p}, linesize[0]={})",
+                            p0,
+                            p1,
+                            stride0
+                        );
                         ChiakiError::Unknown
                     })?;
-                (
+                Ok((
                     [
                         Plane {
                             data: NonNull::new_unchecked(p0),
@@ -738,7 +981,7 @@ impl Decoder {
                         },
                     ],
                     aligned,
-                )
+                ))
             }
             sys::AV_PIX_FMT_YUV420P => {
                 // Software-Pfad: nach NV12 konvertieren (Renderer-Vertrag).
@@ -796,7 +1039,7 @@ impl Decoder {
                     tracing::error!("sws_scale failed: {}", ffmpeg::err_str(api, r));
                     return Err(ChiakiError::Unknown);
                 }
-                (
+                Ok((
                     [
                         Plane {
                             data: NonNull::new_unchecked(buf_ptr),
@@ -808,53 +1051,16 @@ impl Decoder {
                         },
                     ],
                     h,
-                )
+                ))
             }
             other => {
                 tracing::error!(
                     "Unsupported pixel format {} (HDR/10-bit needs P010 support)",
                     ffmpeg::pix_fmt_name(api, other)
                 );
-                return Err(ChiakiError::Unknown);
+                Err(ChiakiError::Unknown)
             }
-        };
-
-        // C: chiaki_ffmpeg_frame_get_timing (Fallback-Kette pkt_timebase →
-        // ctx time_base → 1/1e6; best_effort_timestamp → pts → 0). Liegt keine
-        // Frame-Dauer vor, greift die synthetische Dauer (C: pull_frame-Override).
-        let ctx = &*self.codec_ctx.as_ptr();
-        let mut time_base = ctx.pkt_timebase;
-        if !time_base.is_valid() {
-            time_base = ctx.time_base;
         }
-        if !time_base.is_valid() {
-            time_base = sys::AVRational::new(1, 1_000_000);
-        }
-        let mut pts = frame.best_effort_timestamp;
-        if pts == sys::AV_NOPTS_VALUE {
-            pts = frame.pts;
-        }
-        if pts == sys::AV_NOPTS_VALUE {
-            pts = 0;
-        }
-        let pts_secs = time_base.q2d() * pts as f64;
-        let duration = if frame.duration > 0 {
-            time_base.q2d() * frame.duration as f64
-        } else {
-            self.timing.duration_secs()
-        };
-
-        Ok(DecodedFrame {
-            width,
-            height,
-            format: FrameFormat::Nv12,
-            planes,
-            aligned_height,
-            pts: pts_secs,
-            duration,
-            frames_lost,
-            recovered,
-        })
     }
 }
 

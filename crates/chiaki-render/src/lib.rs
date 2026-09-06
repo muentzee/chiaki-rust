@@ -4,6 +4,7 @@
 //! wiederverwendbaren [`presenter::VideoPresenter`], der NV12-Frames als
 //! GPUI-`RenderImage`-Texturen pro Frame darstellt.
 
+pub mod gpu_sink;
 pub mod nv12;
 pub mod presenter;
 

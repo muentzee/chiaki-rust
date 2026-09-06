@@ -473,12 +473,23 @@ impl Render for AppShell {
                 .into_any_element()
         });
 
+        // GPU-Stream-Modus: Shell-Hintergrund transparent, damit das Video-
+        // Fenster unter der gpui-Surface sichtbar bleibt (Stream-Seite malt
+        // ihren Bereich selbst; außerhalb des Streams bleibt theme::BG).
+        let shell_bg = if cx
+            .has_global::<crate::pages::stream::state::StreamUiState>()
+            && cx.global::<crate::pages::stream::state::StreamUiState>().gpu_active()
+        {
+            gpui::transparent_black()
+        } else {
+            theme::BG
+        };
         div()
             .id("shell")
             .size_full()
             .flex()
             .flex_row()
-            .bg(theme::BG)
+            .bg(shell_bg)
             .text_color(theme::TEXT_PRIMARY)
             .font_family(theme::FONT_FAMILY)
             .text_size(px(theme::SIZE_BODY))

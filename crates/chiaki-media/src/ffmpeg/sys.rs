@@ -63,6 +63,8 @@ pub const AV_HWDEVICE_TYPE_NONE: c_int = 0;
 /// NONE=0, VDPAU=1, CUDA=2, VAAPI=3, DXVA2=4, QSV=5, VIDEOTOOLBOX=6,
 /// D3D11VA=7, DRM=8, OPENCL=9, MEDIACODEC=10, VULKAN=11, D3D12VA=12).
 pub const AV_HWDEVICE_TYPE_CUDA: c_int = 2;
+/// `AV_HWDEVICE_TYPE_D3D11VA` (gleiche Enum-Reihenfolge).
+pub const AV_HWDEVICE_TYPE_D3D11VA: c_int = 7;
 
 // ---------------------------------------------------------------------------
 // Opaque Typen (nur als Pointer im Umlauf)
@@ -178,6 +180,23 @@ pub struct AVCUDADeviceContext {
     pub cuda_stream: *mut c_void,
     /// AVCUDADeviceContextInternal*
     pub internal: *mut c_void,
+}
+
+/// C: `typedef struct AVD3D11VADeviceContext` (libavutil/hwcontext_d3d11va.h).
+/// Wird für den externen-Device-Pfad gefüllt (Decoder teilt das D3D11-Device
+/// des GPU-Sinks — Zero-Copy-CopySubresourceRegion auf EINEM Device) und von
+/// `av_hwdevice_ctx_init` übernommen. Die lock/unlock-Callbacks bleiben NULL
+/// (FFmpeg nutzt dann keine Sperren; die Thread-Sicherheit liefert
+/// ID3D11Multithread::SetMultithreadProtected auf dem Device-Context).
+#[repr(C)]
+pub struct AVD3D11VADeviceContext {
+    /// ID3D11Device*
+    pub device: *mut c_void,
+    /// ID3D11DeviceContext*
+    pub device_context: *mut c_void,
+    pub lock: Option<unsafe extern "system" fn(lock_ctx: *mut c_void) -> c_int>,
+    pub unlock: Option<unsafe extern "system" fn(lock_ctx: *mut c_void) -> c_int>,
+    pub lock_ctx: *mut c_void,
 }
 
 /// C: `typedef struct AVChannelLayout` (channel_layout.h) — Union u64/Pointer,
@@ -580,6 +599,15 @@ pub type FnAvHwdeviceCtxCreate = unsafe extern "system" fn(
     options: *mut *mut AVDictionary,
     flags: c_int,
 ) -> c_int;
+/// `av_hwdevice_ctx_alloc(AVHWDeviceType type)` — für den externen-Device-Pfad
+/// (D3D11VA mit Sink-Device): alloc → hwctx füllen → `av_hwdevice_ctx_init`.
+pub type FnAvHwdeviceCtxAlloc =
+    unsafe extern "system" fn(ty: c_int) -> *mut AVBufferRef;
+pub type FnAvHwdeviceCtxInit =
+    unsafe extern "system" fn(device_ctx: *mut AVBufferRef) -> c_int;
+/// `av_get_pix_fmt(const char *name)` — Pseudo-/HW-Formate (d3d11, cuda) zur
+/// Laufzeit per Name auflösen statt Enum-Werte zu pinnen.
+pub type FnAvGetPixFmt = unsafe extern "system" fn(name: *const c_char) -> c_int;
 pub type FnAvBufferRefFn = unsafe extern "system" fn(buf: *mut AVBufferRef) -> *mut AVBufferRef;
 pub type FnAvBufferUnref = unsafe extern "system" fn(buf: *mut *mut AVBufferRef);
 /// Signatur wie in vsrupscaler.cpp genutzt (NV12-Contiguity-Buffer).
@@ -654,6 +682,9 @@ pub struct Api {
     pub av_log_format_line: FnAvLogFormatLine,
     pub av_hwdevice_find_type_by_name: FnAvHwdeviceFindTypeByName,
     pub av_hwdevice_ctx_create: FnAvHwdeviceCtxCreate,
+    pub av_hwdevice_ctx_alloc: FnAvHwdeviceCtxAlloc,
+    pub av_hwdevice_ctx_init: FnAvHwdeviceCtxInit,
+    pub av_get_pix_fmt: FnAvGetPixFmt,
     pub av_buffer_ref: FnAvBufferRefFn,
     pub av_buffer_unref: FnAvBufferUnref,
     pub av_buffer_create: FnAvBufferCreate,

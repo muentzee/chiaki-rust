@@ -279,6 +279,15 @@ fn resolve(avutil: &Library, avcodec: &Library, swscale: &Library) -> Result<Api
                 avutil,
                 "av_hwdevice_ctx_create" as sys::FnAvHwdeviceCtxCreate
             ),
+            av_hwdevice_ctx_alloc: sym!(
+                avutil,
+                "av_hwdevice_ctx_alloc" as sys::FnAvHwdeviceCtxAlloc
+            ),
+            av_hwdevice_ctx_init: sym!(
+                avutil,
+                "av_hwdevice_ctx_init" as sys::FnAvHwdeviceCtxInit
+            ),
+            av_get_pix_fmt: sym!(avutil, "av_get_pix_fmt" as sys::FnAvGetPixFmt),
             av_buffer_ref: sym!(avutil, "av_buffer_ref" as sys::FnAvBufferRefFn),
             av_buffer_unref: sym!(avutil, "av_buffer_unref" as sys::FnAvBufferUnref),
             av_buffer_create: sym!(avutil, "av_buffer_create" as sys::FnAvBufferCreate),

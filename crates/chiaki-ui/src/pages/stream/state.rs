@@ -37,6 +37,8 @@ use crate::components::ToastData;
 use chiaki_core::controller::ControllerState;
 use chiaki_core::discovery::DiscoveryHostState;
 use chiaki_input::{combine_states, Key as InKey, KeyboardMapper};
+use chiaki_render::gpu_sink::{GpuSink, GpuSinkHandle, SinkZoom};
+use crate::backend::sessions::GPUI_WINDOW_TITLE;
 use chiaki_render::presenter::VideoPresenter;
 use chiaki_settings::hosts::HostMac;
 
@@ -276,6 +278,13 @@ pub struct StreamUiState {
     // Video/HUD-Quellen.
     pub presenter: Option<VideoPresenter>,
     pub telemetry: Option<Arc<StreamTelemetry>>,
+    /// GPU-Videopfad-Handle (`settings/video_output`); `Some` + !is_lost →
+    /// die Stream-Seite malt den Video-Bereich TRANSPARENT (das D3D11-Sink-
+    /// Fenster liegt unter dem gpui-Fenster).
+    pub gpu: Option<GpuSinkHandle>,
+    /// Owner des Sink-Fensters (lebt bis zum Verlassen der Stream-Seite;
+    /// im echten Pfad besitzt ihn der Session-Stop-Thread).
+    pub gpu_sink: Option<GpuSink>,
 
     // Connecting-Flow.
     pub request: Option<ConnectRequest>,
@@ -344,6 +353,8 @@ impl StreamUiState {
             throttle_timer_pending: false,
             presenter: None,
             telemetry: None,
+            gpu: None,
+            gpu_sink: None,
             request: None,
             standby: false,
             stage: Stage::Wake,
@@ -437,12 +448,35 @@ impl StreamUiState {
             .map(|v| v.eq_ignore_ascii_case("pin"))
             .unwrap_or(false);
         let pin_flag = Arc::new(AtomicBool::new(false));
+        // GPU-Sink für den Fake-Modus (settings/video_output != cpu) — der
+        // komplette GPU-Anzeigepfad ist so ohne Konsole testbar.
+        let mut gpu_handle: Option<GpuSinkHandle> = None;
+        {
+            let settings = self.backend.settings().lock().unwrap_or_else(|e| e.into_inner());
+            let want = settings.video_output();
+            drop(settings);
+            if want != "cpu" {
+                match GpuSink::new(GPUI_WINDOW_TITLE, (fake::WIDTH, fake::HEIGHT)) {
+                    Ok(sink) => {
+                        let h = sink.handle();
+                        tracing::info!("FAKE-Stream: GPU-Sink aktiv (Upload-Pfad, {}x{})", fake::WIDTH, fake::HEIGHT);
+                        gpu_handle = Some(h);
+                        self.gpu = gpu_handle.clone();
+                        self.gpu_sink = Some(sink);
+                    }
+                    Err(err) => {
+                        tracing::error!("FAKE-Stream: GPU-Sink-Start fehlgeschlagen ({err}) — Presenter-Pfad")
+                    }
+                }
+            }
+        }
         fake::start(
             presenter.clone(),
             Arc::clone(&telemetry),
             Arc::clone(&stop),
             Arc::clone(&connected),
             if pin_enabled { Some(Arc::clone(&pin_flag)) } else { None },
+            gpu_handle,
         );
         self.presenter = Some(presenter);
         self.telemetry = Some(telemetry);
@@ -561,6 +595,20 @@ impl StreamUiState {
                 self.telemetry = Some(Arc::clone(&active.telemetry));
                 if self.stage == Stage::Login {
                     self.login_active_since = None; // Session da → Heuristik stoppen
+                }
+            }
+        }
+        // GPU-Handle übernehmen (einmalig; Zoom-Modus an den Sink übergeben).
+        if self.gpu.is_none() {
+            if let Some(active) = &active {
+                if let Some(gpu) = &active.gpu {
+                    self.gpu = Some(gpu.clone());
+                    gpu.set_zoom(match self.zoom {
+                        ZoomMode::Fit => SinkZoom::Fit,
+                        ZoomMode::Zoom => SinkZoom::Zoom,
+                        ZoomMode::Stretch => SinkZoom::Stretch,
+                    });
+                    tracing::info!("StreamView: GPU-Videopfad übernommen (transparenter Video-Bereich)");
                 }
             }
         }
@@ -896,6 +944,22 @@ impl StreamUiState {
 
     pub fn cycle_zoom(&mut self) {
         self.zoom = self.zoom.next();
+        // GPU-Pfad: Viewport-Mathe läuft im Sink-Render-Thread (Fit/Zoom/
+        // Stretch wie in VideoSurface.paint).
+        if let Some(gpu) = &self.gpu {
+            gpu.set_zoom(match self.zoom {
+                ZoomMode::Fit => SinkZoom::Fit,
+                ZoomMode::Zoom => SinkZoom::Zoom,
+                ZoomMode::Stretch => SinkZoom::Stretch,
+            });
+        }
+    }
+
+    /// GPU-Videopfad aktiv UND gesund → Video-Bereich transparent malen
+    /// (das D3D11-Sink-Fenster zeigt das Bild unter dem gpui-Fenster).
+    pub fn gpu_active(&self) -> bool {
+        self.stage == Stage::Streaming
+            && self.gpu.as_ref().is_some_and(|g| !g.is_lost())
     }
 
     pub fn toggle_mic(&mut self) {
