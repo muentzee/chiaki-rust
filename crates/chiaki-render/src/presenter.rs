@@ -143,7 +143,7 @@ pub struct VideoPresenter {
 struct PresenterInner {
     width: u32,
     height: u32,
-    queue: Mutex<Option<NV12Frame>>,
+    queue: Mutex<Option<Arc<RenderImage>>>,
     previous: Mutex<Option<Arc<RenderImage>>>,
     stats: Arc<PresenterStats>,
 }
@@ -167,38 +167,18 @@ impl VideoPresenter {
         (self.inner.width, self.inner.height)
     }
 
-    /// Legt den neuesten Frame ab (Producer-Thread). Überschreibt einen noch
-    /// nicht konvertierten Frame (dieser zählt als `frames_dropped`).
+    /// Legt den neuesten Frame ab (Producer-/Media-Thread) und konvertiert
+    /// ihn DORT nach BGRA + `RenderImage`. Grund: die UI soll pro Videoframe
+    /// nur noch Paint + `drop_image` machen — Konvertierung (parallel) und
+    /// 16-MB-Allokation laufen parallel zur VSR-/Decode-Wartezeit statt im
+    /// Render-Thread zu stehlen (FPS-Drops bei Bewegung).
     pub fn set_frame(&self, frame: NV12Frame) {
         self.inner.stats.frames_generated.fetch_add(1, Ordering::Relaxed);
-        let mut queue = self.inner.queue.lock().unwrap();
-        if queue.replace(frame).is_some() {
-            self.inner.stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
-        }
-    }
 
-    /// Holt den neuesten Frame, konvertiert ihn nach BGRA und verpackt ihn als
-    /// `RenderImage`. Gibt das vorherige Bild im GPUI-Atlas frei. Wenn gerade
-    /// kein neuer Frame ansteht, wird das zuletzt präsentierte Bild zurückgegeben
-    /// (Re-Paint ohne Upload).
-    ///
-    /// Muss auf dem GPUI-Render-Thread laufen (`Window`-Zugriff).
-    pub fn take_image(&self, window: &mut Window) -> Option<Arc<RenderImage>> {
-        let frame = self.inner.queue.lock().unwrap().take();
-        let Some(frame) = frame else {
-            return self.inner.previous.lock().unwrap().clone();
-        };
-
-        // 1) Zielbuffer (8,3 MB @ 1080p) — frisch pro Frame, weil der Besitz
-        //    an RenderImage/image::Frame übergeht. Wird separat gemessen
-        //    (Page-Commit-Kosten sind ein realer Teil des RenderImage-Pfads).
         let alloc_start = Instant::now();
         let mut bgra = vec![0u8; frame.bgra_len()];
-        let alloc_us = alloc_start.elapsed();
+        self.inner.stats.alloc_us.record(alloc_start.elapsed());
 
-        // 2) NV12 → BGRA (CPU, parallel — messbar). Der sequenzielle Pfad
-        // kostet bei 4K ~14 ms und frisst die 60-Hz-Budgets auf (VSR-Output!);
-        // die Thread-Pool-Variante liegt laut spike-s1-results.md bei ~2,2 ms.
         let conversion_start = Instant::now();
         let workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(2, 8))
@@ -220,32 +200,51 @@ impl VideoPresenter {
         if let Err(err) = result {
             warn!("NV12→BGRA conversion failed: {err}");
             self.inner.stats.conversion_errors.fetch_add(1, Ordering::Relaxed);
-            return self.inner.previous.lock().unwrap().clone();
+            return;
         }
-        let conversion_us = conversion_start.elapsed();
+        self.inner.stats.conversion_us.record(conversion_start.elapsed());
 
-        // 2) BGRA → RenderImage (Allokation + nullkopierte Frame-Übernahme)
         let wrap_start = Instant::now();
-        let rgba = RgbaImage::from_raw(frame.width, frame.height, bgra)?;
-        let image = Arc::new(RenderImage::new([ImageFrame::new(rgba)]));
-        let wrap_us = wrap_start.elapsed();
-
-        // 3) Vorheriges Atlas-Tile freigeben (sonst VRAM-Wachstum)
-        let previous = {
-            let mut prev = self.inner.previous.lock().unwrap();
-            prev.replace(image.clone())
+        let Some(rgba) = RgbaImage::from_raw(frame.width, frame.height, bgra) else {
+            return;
         };
+        let image = Arc::new(RenderImage::new([ImageFrame::new(rgba)]));
+        self.inner.stats.wrap_us.record(wrap_start.elapsed());
+
+        let mut queue = self.inner.queue.lock().unwrap();
+        if queue.replace(image).is_some() {
+            self.inner.stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Holt den neuesten Frame, konvertiert ihn nach BGRA und verpackt ihn als
+    /// `RenderImage`. Gibt das vorherige Bild im GPUI-Atlas frei. Wenn gerade
+    /// kein neuer Frame ansteht, wird das zuletzt präsentierte Bild zurückgegeben
+    /// (Re-Paint ohne Upload).
+    ///
+    /// Muss auf dem GPUI-Render-Thread laufen (`Window`-Zugriff).
+    /// Nimmt das neueste (bereits auf dem Media-Thread konvertierte) Bild
+    /// aus der Queue, gibt das vorherige im GPUI-Atlas frei und liefert das
+    /// Bild zum Malen. Wenn kein neuer Frame ansteht, wird das zuletzt
+    /// präsentierte Bild zurückgegeben (Re-Paint ohne Upload).
+    ///
+    /// Muss auf dem GPUI-Render-Thread laufen (`Window`-Zugriff).
+    pub fn take_image(&self, window: &mut Window) -> Option<Arc<RenderImage>> {
+        let image = self.inner.queue.lock().unwrap().take();
+        let Some(image) = image else {
+            return self.inner.previous.lock().unwrap().clone();
+        };
+
+        // Vorheriges Atlas-Tile freigeben (sonst VRAM-Wachstum)
+        let drop_start = Instant::now();
+        let previous = self.inner.previous.lock().unwrap().replace(image.clone());
         if let Some(previous) = previous {
-            let drop_start = Instant::now();
             if let Err(err) = window.drop_image(previous) {
                 warn!("drop_image failed: {err}");
             }
             self.inner.stats.drop_image_us.record(drop_start.elapsed());
         }
 
-        self.inner.stats.alloc_us.record(alloc_us);
-        self.inner.stats.conversion_us.record(conversion_us);
-        self.inner.stats.wrap_us.record(wrap_us);
         self.inner.stats.frames_presented.fetch_add(1, Ordering::Relaxed);
         Some(image)
     }

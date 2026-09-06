@@ -1373,10 +1373,23 @@ impl SessionCallbacks for BridgeCallbacks {
 // ---------------------------------------------------------------------------
 
 pub(crate) mod media {
+
     //! Besitzt alle nicht-threadsicheren Media-Ressourcen (siehe Modul-Doku
     //! des übergeordneten Moduls). Endet, wenn der `MediaCmd`-Sender
     //! gedroppt wird (Session-Stop) und räumt AudioOutput/AudioInput/
     //! HapticsPlayer **auf diesem Thread** ab (!Send-Verträge von cpal).
+
+/// Laufende Timing-Sammlung des Media-Threads (Ø über 300-Frame-Fenster).
+#[derive(Default)]
+struct MediaTimings {
+    samples: u64,
+    frames: u64,
+    decode_us: u64,
+    nv12_copy_us: u64,
+    vsr_us: u64,
+    out_copy_us: u64,
+}
+
 
     use super::{haptics_rumble_fallback, ActiveSession, FeedbackCmd, FeedbackSink, MediaCmd, MediaSettings};
     use chiaki_core::ChiakiResult;
@@ -1431,6 +1444,7 @@ pub(crate) mod media {
         };
         let mut vsr_inited = false;
         let mut vsr_buf = FrameBuf::new();
+        let mut t = MediaTimings::default();
 
         // --- Audio (OpusDecoder + Output entstehen mit dem AudioHeader) ---
         let mut opus = OpusAudioDecoder::new();
@@ -1566,11 +1580,14 @@ pub(crate) mod media {
                 let mut latest: Option<(NV12Frame, f64, f64, i32, bool)> = None;
                 while let Some(sample) = session.shared_video_slot().pop() {
                     let Some(decoder) = decoder.as_mut() else { break };
+                    let t0 = std::time::Instant::now();
                     let decoded = decoder.decode_sample(
                         &sample.data,
                         sample.frames_lost,
                         sample.frame_recovered,
                     );
+                    t.decode_us += t0.elapsed().as_micros() as u64;
+                    t.samples += 1;
                     match decoded {
                         Ok(Some(frame)) => {
                             // VSR einmalig mit dem ersten Frame initialisieren
@@ -1597,7 +1614,10 @@ pub(crate) mod media {
                                     tracing::info!("VSR: Engine in {ms} ms geladen");
                                 }
                             }
-                            match nv12_from_planes(&frame) {
+                            let t1 = std::time::Instant::now();
+                            let nv12_res = nv12_from_planes(&frame);
+                            t.nv12_copy_us += t1.elapsed().as_micros() as u64;
+                            match nv12_res {
                                 Ok(nv12) => {
                                     latest = Some((
                                         nv12,
@@ -1620,7 +1640,8 @@ pub(crate) mod media {
                     continue;
                 };
                 let vsr_used = if vsr_inited {
-                    vsr.as_mut().is_some_and(|up| {
+                    let t2 = std::time::Instant::now();
+                    let used = vsr.as_mut().is_some_and(|up| {
                         up.process_frame_nv12(
                             &nv12.y_plane(),
                             &nv12.uv_plane(),
@@ -1634,26 +1655,48 @@ pub(crate) mod media {
                             recovered,
                             &mut vsr_buf,
                         )
-                    })
+                    });
+                    t.vsr_us += t2.elapsed().as_micros() as u64;
+                    used
                 } else {
                     false
                 };
                 let out = if vsr_used {
-                    match nv12_from_contiguous(
+                    // Zero-Copy: der VSR-Output ist bereits NV12-layoutet
+                    // (Y@0 + UV@pitch*h, contiguous) — Buffer ÜBERNEHMEN statt
+                    // 12 MB zu kopieren.
+                    let t3 = std::time::Instant::now();
+                    let moved = NV12Frame::from_parts(
                         vsr_buf.width(),
                         vsr_buf.height(),
                         vsr_buf.pitch(),
-                        &vsr_buf,
-                    ) {
+                        vsr_buf.pitch(),
+                        vsr_buf.clone().into_data(),
+                    );
+                    t.out_copy_us += t3.elapsed().as_micros() as u64;
+                    match moved {
                         Ok(out) => out,
                         Err(err) => {
-                            tracing::error!("VSR-Output-Kopie fehlgeschlagen: {err:?}");
+                            tracing::error!("VSR-Output-Übernahme fehlgeschlagen: {err:?}");
                             nv12
                         }
                     }
                 } else {
                     nv12
                 };
+                t.frames += 1;
+                if t.frames % 300 == 0 {
+                    let n = t.frames.max(1) as f64;
+                    tracing::info!(
+                        "Media-Pipeline (Ø über {} Frames, {} Samples, Slot-Drops {}): decode {:.2} ms, nv12-copy {:.2} ms, vsr {:.2} ms, out-take {:.2} ms — Summe {:.2} ms/Frame (Budget 16,7)",
+                        t.frames, t.samples, session.shared_video_slot().dropped(),
+                        t.decode_us as f64 / n / 1000.0,
+                        t.nv12_copy_us as f64 / n / 1000.0,
+                        t.vsr_us as f64 / n / 1000.0,
+                        t.out_copy_us as f64 / n / 1000.0,
+                        (t.decode_us + t.nv12_copy_us + t.vsr_us + t.out_copy_us) as f64 / n / 1000.0,
+                    );
+                }
                 session.presenter.set_frame(out);
             }
         }

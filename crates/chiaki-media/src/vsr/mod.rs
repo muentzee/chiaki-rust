@@ -166,6 +166,12 @@ impl FrameBuf {
     }
 
     /// Byte-Stride beider Planen.
+    /// Gibt den Buffer zur Zero-Copy-Übernahme heraus (Struktur danach leer;
+    /// der nächste `process_frame` alloziert neu).
+    pub fn into_data(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buf)
+    }
+
     pub fn pitch(&self) -> usize {
         self.pitch
     }

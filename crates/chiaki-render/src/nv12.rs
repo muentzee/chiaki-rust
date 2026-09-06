@@ -58,6 +58,31 @@ impl NV12Frame {
     }
 
     /// Frischer, leerer Frame mit expliziten Strides (für aligned-height-Layouts).
+    /// Zero-Copy-Konstruktor aus einem fremden, bereits NV12-layouteten
+    /// Puffer (z. B. VSR-Output: Y@0 + UV@y_stride*h, uv_stride == y_stride).
+    /// `data` wird ÜBERNOMMEN (kein Kopieren). Validiert die Länge.
+    pub fn from_parts(
+        width: u32,
+        height: u32,
+        y_stride: usize,
+        uv_stride: usize,
+        data: Vec<u8>,
+    ) -> Result<Self> {
+        if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+            return Err(Error::InvalidDimensions { width, height });
+        }
+        let y_len = y_stride
+            .checked_mul(height as usize)
+            .ok_or(Error::InvalidDimensions { width, height })?;
+        let uv_len = uv_stride
+            .checked_mul(height as usize / 2)
+            .ok_or(Error::InvalidDimensions { width, height })?;
+        if data.len() < y_len + uv_len {
+            return Err(Error::InvalidDimensions { width, height });
+        }
+        Ok(Self { width, height, y_stride, uv_stride, data })
+    }
+
     pub fn with_strides(
         width: u32,
         height: u32,
