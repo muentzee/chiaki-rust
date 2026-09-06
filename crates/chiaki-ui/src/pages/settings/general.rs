@@ -40,10 +40,16 @@ pub(crate) fn sections(
     drop(s);
 
     let mut behaviour = Section::new("Behaviour");
-    behaviour.push(inactive(select_row(
+    // disconnect_action: wirkt im Stream-Quit (sauberes Ende → "sleep" fährt
+    // die Konsole automatisch in den Ruhemodus, "nothing" tut nichts, "ask"
+    // öffnet den Trennen-Dialog per Esc) und im Trennen-Knopf des Dialogs.
+    behaviour.push(select_row(
         "general-disconnect-action",
         "Action on disconnect",
-        Some("What to do with the console when the stream is disconnected"),
+        Some(
+            "What to do with the console when the stream is disconnected \
+             (Sleep = automatic standby on clean disconnect)",
+        ),
         "quit sleep ask close",
         true,
         opts(&[("nothing", "Do Nothing"), ("sleep", "Enter Sleep Mode"), ("ask", "Ask")]),
@@ -55,7 +61,7 @@ pub(crate) fn sections(
                 _ => chiaki_settings::settings::DisconnectAction::Ask,
             });
         },
-    ), "Trenn-Aktion (Sleep/Ask) beim Stream-Ende nicht implementiert"));
+    ));
     behaviour.push(inactive(select_row(
         "general-suspend-action",
         "Action on suspend",

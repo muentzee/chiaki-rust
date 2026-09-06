@@ -93,7 +93,7 @@ fn vsr_full_init_and_single_frame_upscale_on_gpu() {
     let (_buf, frame) = synthetic_nv12_frame(128, 128);
 
     assert!(
-        up.init(&frame, cuda_ctx, cuda_stream, 200),
+        up.init(&frame, cuda_ctx, cuda_stream, 200, None),
         "VSR init muss mit CUDA-Kontext klappen: last_error={:?}",
         up.last_error()
     );

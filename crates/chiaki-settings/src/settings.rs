@@ -935,6 +935,30 @@ impl Settings {
     acc_int!(nv_vsr_scale, set_nv_vsr_scale, "settings/nv_vsr_scale", 0);
     acc_string!(nv_vsr_sdk_path, set_nv_vsr_sdk_path, "settings/nv_vsr_sdk_path");
 
+    /// `settings/nv_vsr_quality` — QualityLevel des NVVFX-VSR-Netzes
+    /// (0 = Auto, 1 = low, 2 = medium, 3 = high; der C++-Client leitet die
+    /// Qualität fix aus dem Scale-Faktor ab, daher ist dies eine
+    /// dokumentierte Rust-Erweiterung mit "Auto" als Default).
+    pub fn nv_vsr_quality(&self) -> i64 {
+        self.store.int_or("settings/nv_vsr_quality", 0).clamp(0, 3)
+    }
+
+    pub fn set_nv_vsr_quality(&mut self, quality: i64) {
+        self.store
+            .set_value("settings/nv_vsr_quality", Value::Int(quality.clamp(0, 3)));
+    }
+
+    /// `settings/stick_deadzone` — tote Zone der Analog-Sticks in Prozent
+    /// (0..=50; 0 = aus, wie im C++-Client; dokumentierte Rust-Erweiterung).
+    pub fn stick_deadzone(&self) -> i64 {
+        self.store.int_or("settings/stick_deadzone", 0).clamp(0, 50)
+    }
+
+    pub fn set_stick_deadzone(&mut self, percent: i64) {
+        self.store
+            .set_value("settings/stick_deadzone", Value::Int(percent.clamp(0, 50)));
+    }
+
     /// `GetLogLevelMask()`: alles außer VERBOSE, wenn nicht log_verbose.
     pub fn log_level_mask(&self) -> u32 {
         let mut mask = CHIAKI_LOG_ALL;

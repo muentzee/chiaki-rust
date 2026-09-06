@@ -196,27 +196,42 @@ impl AppShell {
     }
 
     /// Button-Index im obersten Dialog gedrückt: `closes` → pop, dann Action.
+    ///
+    /// Bewusst als assoziierte Funktion mit `WeakEntity` + `&mut App`: Die
+    /// Action läuft NACH dem `shell.update` (außerhalb des Entity-Borrows) —
+    /// Dialog-Actions rufen selbst `shell.update` auf (Trennen → disconnect +
+    /// navigate, Kontextmenü → connect). Ein Aufruf innerhalb dieses Updates
+    /// wäre ein verbotener Re-Entry und bricht die App mit „cannot update
+    /// AppShell while it is already being updated“ ab.
     pub fn invoke_dialog_button(
-        &mut self,
+        shell: &gpui::WeakEntity<Self>,
         index: usize,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
-        // Action aus dem Dialog nehmen (Option::take braucht &mut).
-        let action = {
-            let Some(dialog) = self.dialogs.last_mut() else { return };
-            let Some(button) = dialog.buttons.get_mut(index) else { return };
-            let action = button.action.take();
-            let closes = button.closes || action.is_some();
-            (closes, action)
-        };
-        let (closes, action) = action;
-        if closes {
-            self.dialogs.pop();
-            cx.notify();
-        }
+        let action = shell
+            .update(cx, |shell, cx| {
+                // Action aus dem Dialog nehmen (Option::take braucht &mut);
+                // pop erst nach dem Borrow-Scope.
+                let (closes, action) = {
+                    let Some(dialog) = shell.dialogs.last_mut() else { return None };
+                    let Some(button) = dialog.buttons.get_mut(index) else { return None };
+                    let action = button.action.take();
+                    let closes = button.closes || action.is_some();
+                    (closes, action)
+                };
+                if closes {
+                    shell.dialogs.pop();
+                    cx.notify();
+                }
+                Some(action)
+            })
+            // Result → Option (update) → Option (Closure) → Option (action).
+            .ok()
+            .flatten()
+            .flatten();
         if let Some(action) = action {
-            action(window, &mut *cx);
+            action(window, cx);
         }
     }
 
@@ -461,9 +476,7 @@ impl Render for AppShell {
             if interactive {
                 let shell_weak = shell_weak.clone();
                 layer = layer.on_button(move |index, window, cx: &mut App| {
-                    let _ = shell_weak.update(cx, |shell, cx| {
-                        shell.invoke_dialog_button(index, window, cx)
-                    });
+                    AppShell::invoke_dialog_button(&shell_weak, index, window, cx);
                 });
             }
             layer

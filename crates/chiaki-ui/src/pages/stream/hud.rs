@@ -31,9 +31,13 @@ fn stat_badge(label: &str, value: String) -> gpui::AnyElement {
         )
         .child(
             div()
+                // min-width: Werte wie „—“ ↔ „50.8 ms“ sollen die Badge-
+                // Reihe nicht jede Sekunde verschieben (Spec: „nichts hüpft“).
+                .min_w(px(40.0))
                 .text_size(px(theme::SIZE_CAPTION))
                 .font_weight(gpui::FontWeight(theme::WEIGHT_CAPTION))
                 .text_color(theme::TEXT_PRIMARY)
+                .whitespace_nowrap()
                 .child(value),
         )
         .into_any_element()
@@ -115,9 +119,15 @@ pub fn live_badge(snap: &StreamSnapshot) -> gpui::AnyElement {
         .flex()
         .items_center()
         .gap_2()
+        .min_w_0()
         .child(StatusBadge::new(StatusKind::Ready).label(if snap.fake { "Stream (FAKE)" } else { "Stream" }))
         .child(
             div()
+                .flex_1()
+                .min_w_0()
+                // Lange Host-Namen: eine Zeile, rechts geclippt.
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .text_size(px(theme::SIZE_BODY))
                 .font_weight(gpui::FontWeight(theme::WEIGHT_HEADLINE))
                 .text_color(theme::TEXT_PRIMARY)
@@ -183,7 +193,9 @@ pub fn panel(
                     div()
                         .text_size(px(theme::SIZE_CAPTION))
                         .text_color(theme::TEXT_DISABLED)
-                        .child("H = Panel · F11/Doppelklick = Vollbild · Esc = Trennen?"),
+                        // Kurz genug für eine Zeile in der 320-px-Panel-
+                        // Breite (sonst hängt ein Solo-„?“ in Zeile 2).
+                        .child("H = Panel · F11 = Vollbild · Esc = Trennen?"),
                 ),
         )
         .into_any_element()

@@ -576,6 +576,10 @@ impl VsrUpscaler {
         cuda_ctx: *mut c_void,
         cuda_stream: *mut c_void,
         scale_pct: u32,
+        // QualityLevel des VSR-Netzes (SDK: 0 bicubic, 1 low, 2 medium,
+        // 3 high, 4 ultra). `None` = Auto — exakt das bisherige
+        // C++-Verhalten (`quality = (scalePct >= 300) ? 3 : 2`).
+        quality_override: Option<u32>,
     ) -> bool {
         if self.active || self.disabled {
             return self.active;
@@ -607,6 +611,11 @@ impl VsrUpscaler {
             self.disabled = true;
             return false;
         }
+        // Qualität: Override aus den Settings oder Auto (C++-Verhalten);
+        // defensiv auf den SDK-Bereich geklemmt.
+        let quality = quality_override
+            .unwrap_or_else(|| quality_for_scale(scale_pct))
+            .min(4);
 
         let api = self.api.expect("load_sdk succeeded");
 
@@ -739,12 +748,8 @@ impl VsrUpscaler {
                 (api.vfx_set_object)(effect.as_ptr(), sel_stream.as_ptr(), self.cuda_stream);
             }
             // Qualität/Methode des VSR-Netzes (C: "QualityLevel" — 0 bicubic,
-            // 1 low, 2 medium, 3 high, 4 ultra).
-            let rc_q = (api.vfx_set_u32)(
-                effect.as_ptr(),
-                sel_quality.as_ptr(),
-                quality_for_scale(scale_pct),
-            );
+            // 1 low, 2 medium, 3 high, 4 ultra); Default = Auto wie im C++.
+            let rc_q = (api.vfx_set_u32)(effect.as_ptr(), sel_quality.as_ptr(), quality);
             if rc_q != NVCV_SUCCESS {
                 tracing::warn!(
                     "VSR: NvVFX_SetU32(QualityLevel) failed (status {}), continuing with default",
@@ -794,7 +799,7 @@ impl VsrUpscaler {
             in_h,
             out_w,
             out_h,
-            quality_for_scale(scale_pct),
+            quality,
             self.engine_load_ms.expect("just set")
         );
         true
@@ -1423,7 +1428,7 @@ mod tests {
         let mut up = VsrUpscaler::new(Some(PathBuf::from("Z:/definitiv/nicht/vorhanden")));
         let (_buf, frame) = synthetic_nv12_frame(128, 128);
         assert!(
-            !up.init(&frame, ptr::null_mut(), ptr::null_mut(), 200),
+            !up.init(&frame, ptr::null_mut(), ptr::null_mut(), 200, None),
             "init muss ohne SDK false liefern"
         );
         assert!(!up.is_active());
@@ -1440,8 +1445,8 @@ mod tests {
         // Zweiter init nach disabled liefert weiter false (C: disabled-Flag).
         let mut up = VsrUpscaler::new(Some(PathBuf::from("Z:/definitiv/nicht/vorhanden")));
         let (_buf, frame) = synthetic_nv12_frame(128, 128);
-        assert!(!up.init(&frame, ptr::null_mut(), ptr::null_mut(), 200));
-        assert!(!up.init(&frame, ptr::null_mut(), ptr::null_mut(), 200));
+        assert!(!up.init(&frame, ptr::null_mut(), ptr::null_mut(), 200, None));
+        assert!(!up.init(&frame, ptr::null_mut(), ptr::null_mut(), 200, Some(3)));
         assert!(!up.is_active());
     }
 

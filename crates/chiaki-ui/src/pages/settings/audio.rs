@@ -165,10 +165,15 @@ pub(crate) fn sections(
     ), "Speex-DSP nicht portiert"));
 
     let mut network = Section::new("Network & Latency");
-    network.push(inactive(slider_row(
+    // wifi_dropped_notif_percent: Frame-Verlust im 5-Sekunden-Fenster >
+    // X % → EINMALIG pro Session ein Warn-Toast im Stream (live gelesen).
+    network.push(slider_row(
         "audio-wifi-dropped",
         "Weak Wi-Fi notification",
-        Some("Shows an indicator when packet loss exceeds this value"),
+        Some(
+            "Shows a one-time warning toast when packet loss in a 5-second window \
+             exceeds this value",
+        ),
         "wifi packet loss indicator warning",
         true,
         wifi as f64,
@@ -177,7 +182,7 @@ pub(crate) fn sections(
         1.0,
         format!("\u{2265} {wifi} % dropped (default 3%)"),
         |v, s| s.set_wifi_dropped_notif(v.round() as u64),
-    ), "Wi-Fi-Warnung im Stream-Overlay nicht portiert"));
+    ));
     network.push(slider_row(
         "audio-packet-loss-max",
         "Packet loss reported max",

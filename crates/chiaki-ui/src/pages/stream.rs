@@ -120,8 +120,8 @@ pub fn page(
             cx.global_mut::<StreamUiState>().toggle_panel();
         }
     });
-    let on_disconnect = cx.listener(|_shell, _ev, _window, cx| {
-        dialogs::push_disconnect_confirm(cx);
+    let on_disconnect = cx.listener(|shell, _ev, _window, cx| {
+        dialogs::push_disconnect_confirm(shell, cx);
     });
     let on_goto_bed = cx.listener(|_shell, _ev, _window, cx| {
         if cx.has_global::<StreamUiState>() {
@@ -206,6 +206,7 @@ pub fn page(
                 Some(image) => VideoSurface {
                     image,
                     mode: snap.zoom,
+                    factor: snap.zoom_factor,
                 }
                 .into_any_element(),
                 None => div()
@@ -345,9 +346,14 @@ fn refocus(cx: &mut Context<AppShell>, window: &mut Window) {
 /// Malt ein `RenderImage` je Skalierungsmodus: Fit (Balken), Zoom (Crop,
 /// geclippt durch `overflow_hidden` des Containers), Stretch (verzerrt
 /// füllend). Baut auf dem gemessenen `paint_image`-Pfad des Spike S1 auf.
+///
+/// `factor` = benutzerdefinierter Zoom (settings/zoom_factor; 0 = aus):
+/// im Zoom-Modus wird statt der füllenden Skala die **Fit-Skala × Faktor**
+/// verwendet — dieselbe Mathe wie im GPU-Sink (`sys::draw_and_present`).
 struct VideoSurface {
     image: Arc<RenderImage>,
     mode: ZoomMode,
+    factor: f32,
 }
 
 impl IntoElement for VideoSurface {
@@ -413,7 +419,15 @@ impl Element for VideoSurface {
             ZoomMode::Fit | ZoomMode::Zoom => {
                 let scale = match self.mode {
                     ZoomMode::Fit => (bw / iw).min(bh / ih),
-                    _ => (bw / iw).max(bh / ih),
+                    _ => {
+                        if self.factor > 1.0 {
+                            // Benutzerdefinierter Zoom: Fit-Skala × Faktor
+                            // (Crop ab Faktor > füllend).
+                            (bw / iw).min(bh / ih) * self.factor
+                        } else {
+                            (bw / iw).max(bh / ih)
+                        }
+                    }
                 };
                 let (w, h) = (iw * scale, ih * scale);
                 Bounds {

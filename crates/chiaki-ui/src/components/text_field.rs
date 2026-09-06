@@ -104,6 +104,10 @@ impl RenderOnce for TextField {
         let base = div()
             .flex()
             .items_center()
+            // Einzeilig: Überlaufender Wert wird geclippt, statt über die
+            // feste Feldbreite hinaus zu malen.
+            .overflow_hidden()
+            .whitespace_nowrap()
             .w(px(self.width_px))
             .px(px(theme::SP_3))
             .py(px(theme::SP_2))

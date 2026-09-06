@@ -36,6 +36,7 @@ use crate::backend::{Backend, HostId};
 use crate::components::ToastData;
 use chiaki_core::controller::ControllerState;
 use chiaki_core::discovery::DiscoveryHostState;
+use chiaki_input::gamepad::apply_deadzone;
 use chiaki_input::{combine_states, Key as InKey, KeyboardMapper};
 use chiaki_render::gpu_sink::{GpuSink, GpuSinkHandle, SinkZoom};
 use crate::backend::sessions::GPUI_WINDOW_TITLE;
@@ -72,6 +73,26 @@ pub(crate) fn ensure_and_tick(
     }
 
     cx.global_mut::<StreamUiState>().tick(window);
+
+    // WLAN-/Netzwerk-Drops-Warnung (einmalig pro Session; aus update_stats
+    // gesetzt — dort gibt es kein cx) als Toast ausliefern.
+    let wifi_warn = cx.global_mut::<StreamUiState>().take_wifi_warn();
+    if wifi_warn {
+        let shell = cx.global::<StreamUiState>().shell.clone();
+        cx.spawn(async move |_shell_weak, cx| {
+            let _ = shell.update(cx, |shell, cx| {
+                shell.push_toast(
+                    ToastData::new(crate::components::ToastKind::Warn, "WLAN/Netzwerk-Drops")
+                        .message(
+                            "Hoher Frame-Verlust im Netzwerk — der Stream kann ruckeln. \
+                             (Schwellwert: Einstellungen → Audio & Latency)",
+                        ),
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
 
     if created {
         let focus = cx.global::<StreamUiState>().focus.clone();
@@ -139,7 +160,7 @@ pub(crate) fn maybe_open_disconnect_dialog(
     if cx.global::<StreamUiState>().stage != Stage::Streaming {
         return false;
     }
-    super::dialogs::push_disconnect_confirm(cx);
+    super::dialogs::push_disconnect_confirm(shell, cx);
     true
 }
 
@@ -252,6 +273,7 @@ pub struct StreamSnapshot {
     pub panel_open: bool,
     pub hud_open: bool,
     pub zoom: ZoomMode,
+    pub zoom_factor: f32,
     pub mic_unmuted: bool,
     pub stats: HudStats,
     pub vsr_active: bool,
@@ -308,6 +330,10 @@ pub struct StreamUiState {
     pub panel_open: bool,
     pub hud_open: bool,
     pub zoom: ZoomMode,
+    /// Benutzerdefinierter Zoom (settings/zoom_factor; 0 = aus). > 0: der
+    /// Zoom-Modus skaliert mit **Fit-Skala × Faktor** statt füllend
+    /// (VideoSurface + GPU-Sink, C++-Pendant settings/zoom_factor).
+    pub zoom_factor: f32,
     pub mic_unmuted: bool,
 
     // Input-Loop.
@@ -316,6 +342,17 @@ pub struct StreamUiState {
     last_send: Instant,
     /// Nach Overlay-Schluss den Stream-Fokus wiederherstellen (page).
     pub(crate) refocus_pending: bool,
+
+    // Disconnect-Action (settings/disconnect_action): auto-goto_bed nur
+    // EINMAL pro Stream (das Ruhemodus-Quit erzeugt ein zweites Quit-Event).
+    auto_bed_sent: bool,
+
+    // WLAN-/Netzwerk-Drops (settings/wifi_dropped_notif_percent):
+    // 5-Sekunden-Fenster über die Session-Telemetrie, Warnung EINMALIG
+    // pro Session (pending_wifi_warn wird von ensure_and_tick ausgeliefert).
+    wifi_warned: bool,
+    wifi_window: Option<(Instant, u64, u64)>,
+    pending_wifi_warn: bool,
 
     // Stats-Buchhaltung.
     stats: HudStats,
@@ -377,11 +414,16 @@ impl StreamUiState {
             panel_open: false,
             hud_open: true,
             zoom: ZoomMode::Fit,
+            zoom_factor: 0.0,
             mic_unmuted: false,
             keys: HashSet::new(),
             last_controller: None,
             last_send: Instant::now(),
             refocus_pending: false,
+            auto_bed_sent: false,
+            wifi_warned: false,
+            wifi_window: None,
+            pending_wifi_warn: false,
             stats: HudStats::default(),
             last_stats_at: Instant::now(),
             last_video_bytes: 0,
@@ -431,6 +473,14 @@ impl StreamUiState {
             settings.window_type(),
             chiaki_settings::settings::WindowType::Fullscreen
         );
+        // Benutzerdefinierter Zoom (settings/zoom_factor, > 0 = aktiv):
+        // startet im Zoom-Modus mit Fit-Skala × Faktor (VideoSurface +
+        // GPU-Sink); -1/auto lässt die bisherige Logik laufen.
+        let zoom_factor = settings.zoom_factor();
+        if zoom_factor > 0.0 {
+            state.zoom = ZoomMode::Zoom;
+            state.zoom_factor = zoom_factor as f32;
+        }
         drop(settings);
 
         state
@@ -608,6 +658,7 @@ impl StreamUiState {
                         ZoomMode::Zoom => SinkZoom::Zoom,
                         ZoomMode::Stretch => SinkZoom::Stretch,
                     });
+                    gpu.set_zoom_factor(self.zoom_factor);
                     tracing::info!("StreamView: GPU-Videopfad übernommen (transparenter Video-Bereich)");
                 }
             }
@@ -791,6 +842,27 @@ impl StreamUiState {
                 // Quit-Handling: Session-Ressourcen freigeben (der Cleanup-
                 // Thread wartet aufs Stop-Flag), Toast + zurück auf Home.
                 self.stop_threads();
+                // disconnect_action (settings/disconnect_action): bei einem
+                // sauberen Quit (kein Fehler) fährt "sleep" die Konsole
+                // automatisch in den Ruhemodus (goto_bed, einmalig pro
+                // Stream — das Ruhemodus-Quit erzeugt ein zweites Quit-
+                // Event), "nothing" tut nichts, "ask" verhält sich wie
+                // bisher ohne automatische Aktion (C++ closeRequested).
+                let action = self
+                    .backend
+                    .settings()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .disconnect_action();
+                if !chiaki_core::session::quit_reason_is_error(reason)
+                    && action == chiaki_settings::settings::DisconnectAction::AlwaysSleep
+                    && !self.auto_bed_sent
+                {
+                    self.auto_bed_sent = true;
+                    if let Some(session) = self.backend.sessions().active() {
+                        session.goto_bed();
+                    }
+                }
                 self.backend.sessions().stop_current();
                 let is_error = chiaki_core::session::quit_reason_is_error(reason);
                 let text = if reason_str.is_empty() {
@@ -909,7 +981,9 @@ impl StreamUiState {
 
     /// Kombinierter Controller-State (Gamepads + DualSense + Tastatur-Mapping)
     /// — nur bei Änderung und mit ~120-Hz-Deckel senden (C++:
-    /// `SendFeedbackState` nur bei State-Änderung).
+    /// `SendFeedbackState` nur bei State-Änderung). Die Stick-Deadzone
+    /// (settings/stick_deadzone, 0 = aus wie im C++-Client) wird live aus
+    /// den Settings gelesen und auf den kombinierten State angewendet.
     fn send_controller_state(&mut self) {
         let Some(session) = self.backend.sessions().active() else { return };
         if !session.is_running() {
@@ -922,7 +996,24 @@ impl StreamUiState {
         if !typing && !self.keys.is_empty() {
             states.push(self.mapper().apply_keyboard_state(&self.keys));
         }
-        let state = combine_states(&states);
+        let mut state = combine_states(&states);
+        let deadzone = {
+            let settings = self
+                .backend
+                .settings()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            settings.stick_deadzone() as f32 / 100.0
+        };
+        if deadzone > 0.0 {
+            let rescale = |v: i16| -> i16 {
+                (apply_deadzone(v as f32 / 32767.0, deadzone).clamp(-1.0, 1.0) * 32767.0) as i16
+            };
+            state.left_x = rescale(state.left_x);
+            state.left_y = rescale(state.left_y);
+            state.right_x = rescale(state.right_x);
+            state.right_y = rescale(state.right_y);
+        }
         if self.last_controller.as_ref() != Some(&state)
             && self.last_send.elapsed() >= Duration::from_millis(8)
         {
@@ -945,13 +1036,15 @@ impl StreamUiState {
     pub fn cycle_zoom(&mut self) {
         self.zoom = self.zoom.next();
         // GPU-Pfad: Viewport-Mathe läuft im Sink-Render-Thread (Fit/Zoom/
-        // Stretch wie in VideoSurface.paint).
+        // Stretch wie in VideoSurface.paint, inkl. benutzerdefinierter
+        // Zoom-Faktor).
         if let Some(gpu) = &self.gpu {
             gpu.set_zoom(match self.zoom {
                 ZoomMode::Fit => SinkZoom::Fit,
                 ZoomMode::Zoom => SinkZoom::Zoom,
                 ZoomMode::Stretch => SinkZoom::Stretch,
             });
+            gpu.set_zoom_factor(self.zoom_factor);
         }
     }
 
@@ -973,6 +1066,13 @@ impl StreamUiState {
         if let Some(session) = self.backend.sessions().active() {
             session.goto_bed();
         }
+    }
+
+    /// Markiert die Auto-Ruhemodus-Aktion als erledigt (Ruhemodus-Knopf des
+    /// Disconnect-Dialogs — der Quit-Handler darf dann bei
+    /// disconnect_action "sleep" kein zweites goto_bed senden).
+    pub(crate) fn mark_auto_bed_sent(&mut self) {
+        self.auto_bed_sent = true;
     }
 
     pub fn disconnect_now(&mut self) {
@@ -1093,6 +1193,41 @@ impl StreamUiState {
             self.stats.haptics = t.haptics_mode_name();
         }
 
+        // WLAN-/Netzwerk-Drops (settings/wifi_dropped_notif_percent, C++
+        // wifi-dropped-Hinweis): Frame-Verlust im 5-Sekunden-Fenster
+        // (video_frames_lost/video_frames) > X % → EINMALIG pro Session ein
+        // Warn-Toast; der Schwellwert wird live gelesen (commit_setting).
+        if !self.wifi_warned && self.stage == Stage::Streaming {
+            let threshold = {
+                let settings = self
+                    .backend
+                    .settings()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                settings.wifi_dropped_notif() as f32
+            };
+            let now = Instant::now();
+            match self.wifi_window {
+                None => self.wifi_window = Some((now, frames, lost)),
+                Some((start, f0, l0)) if now.duration_since(start) >= Duration::from_secs(5) => {
+                    self.wifi_window = Some((now, frames, lost));
+                    let window_frames = frames.saturating_sub(f0);
+                    let window_lost = lost.saturating_sub(l0);
+                    if window_frames > 0 {
+                        let pct = window_lost as f32 * 100.0 / window_frames as f32;
+                        if pct > threshold {
+                            self.wifi_warned = true;
+                            self.pending_wifi_warn = true;
+                            tracing::warn!(
+                                "WLAN/Netzwerk-Drops: {pct:.1} % Frame-Verlust im 5-s-Fenster (> {threshold:.0} %)"
+                            );
+                        }
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+
         // RTT: bewusst **direkter Poll über das Backend** statt neuem
         // UiEvent — der Wert steht nach der Senkusha-Phase fest und ändert
         // sich nicht mehr; die Stats laufen ohnehin 1×/Frame (siehe
@@ -1110,6 +1245,12 @@ impl StreamUiState {
                 (x10 > 0).then_some(x10 as f32 / 10.0)
             }
         };
+    }
+
+    /// Ausstehenden WLAN-Warn-Toast abholen (einmalig true; ausgeliefert von
+    /// `ensure_and_tick`, weil `update_stats` kein `cx` sieht).
+    pub(crate) fn take_wifi_warn(&mut self) -> bool {
+        std::mem::take(&mut self.pending_wifi_warn)
     }
 
     pub fn snapshot(&self) -> StreamSnapshot {
@@ -1141,6 +1282,7 @@ impl StreamUiState {
             panel_open: self.panel_open,
             hud_open: self.hud_open,
             zoom: self.zoom,
+            zoom_factor: self.zoom_factor,
             mic_unmuted: self.mic_unmuted,
             stats: self.stats.clone(),
             vsr_active,

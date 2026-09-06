@@ -20,14 +20,24 @@ use super::state::StreamUiState;
 
 /// Bestätigungsdialog „Stream beenden?“ mit Trennen / Ruhemodus / Abbrechen
 /// (Port des C++-Quit-Dialogs: quit → Trennen, goto_bed → Ruhemodus).
-pub(crate) fn push_disconnect_confirm(cx: &mut Context<AppShell>) {
-    let (shell, backend) = {
+///
+/// Bekommt die Shell direkt (`&mut AppShell`): Alle Aufrufer stehen bereits
+/// in einem laufenden `AppShell`-Update (cx.listener / handle_escape) — ein
+/// `shell.update(cx, …)` hier wäre ein verbotener Re-Entry und bricht die
+/// App mit „cannot update AppShell while it is already being updated“ ab.
+pub(crate) fn push_disconnect_confirm(shell: &mut AppShell, cx: &mut Context<AppShell>) {
+    let backend = {
         let state = cx.global::<StreamUiState>();
-        (state.shell.clone(), state.backend.clone())
+        state.backend.clone()
     };
-    let shell_quit = shell.clone();
-    let shell_bed = shell.clone();
-    let backend_bed = backend.clone();
+    // disconnect_action: bei "sleep" (AlwaysSleep) bedeutet Trennen direkt
+    // "Ruhemodus + Trennen" — ohne nochmaliges Nachfragen (C++-Pfad
+    // DisconnectAction::AlwaysSleep → GoToBed + Stop).
+    let always_sleep = {
+        let settings = backend.settings().lock().unwrap_or_else(|e| e.into_inner());
+        settings.disconnect_action() == chiaki_settings::settings::DisconnectAction::AlwaysSleep
+    };
+    let shell_quit = cx.entity().downgrade();
 
     let dialog = Dialog::new(
         "stream-disconnect",
@@ -38,7 +48,11 @@ pub(crate) fn push_disconnect_confirm(cx: &mut Context<AppShell>) {
         DialogButton::new("Trennen", ButtonVariant::Danger).action(move |_window, cx: &mut App| {
             let _ = shell_quit.update(cx, |shell, cx| {
                 if cx.has_global::<StreamUiState>() {
-                    cx.global_mut::<StreamUiState>().disconnect_now();
+                    let state = cx.global_mut::<StreamUiState>();
+                    if always_sleep {
+                        state.goto_bed();
+                    }
+                    state.disconnect_now();
                 }
                 shell.navigate(crate::app::Route::Home, cx);
             });
@@ -48,15 +62,18 @@ pub(crate) fn push_disconnect_confirm(cx: &mut Context<AppShell>) {
         DialogButton::new("Ruhemodus", ButtonVariant::Primary).action(move |_window, cx: &mut App| {
             // Konsole in den Ruhemodus fahren (C++: chiaki_session_goto_bed);
             // das Quit-Event (RemoteShutdown) bringt die UI zurück nach Home.
-            if let Some(session) = backend_bed.sessions().active() {
-                session.goto_bed();
+            // auto_bed_sent markieren — der Quit-Handler (disconnect_action
+            // "sleep") darf dann kein zweites goto_bed mehr schicken.
+            if cx.has_global::<StreamUiState>() {
+                let state = cx.global_mut::<StreamUiState>();
+                state.goto_bed();
+                state.mark_auto_bed_sent();
             }
-            let _ = shell_bed.update(cx, |_shell, _cx| {});
         }),
     )
     .button(DialogButton::new("Abbrechen", ButtonVariant::Ghost));
 
-    let _ = shell.update(cx, |shell, cx| shell.push_dialog(dialog, cx));
+    shell.push_dialog(dialog, cx);
 }
 
 // ---------------------------------------------------------------------------

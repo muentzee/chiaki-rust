@@ -80,41 +80,42 @@ pub(crate) fn sections(
             });
         },
     ));
-    // Custom-Auflösung: Key wird vom Stream-Fenster nicht gelesen
-    // (window_type-Zweige Custom/Selected fallen auf Fit).
-    window.push(inactive(
-        text_row(
-            "video-custom-width",
-            "Custom resolution width",
-            None,
-            "width pixels",
-            window_custom,
-            s.custom_resolution_width().to_string(),
-            "1920",
-            focus_for(cx, "video-custom-width"),
-            |v, s| {
-                let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
-                s.set_custom_resolution_width(digits.parse().unwrap_or(0));
-            },
+    // Custom-Auflösung: nur bei window_type = Custom Resolution wirksam —
+    // dann nutzt das Connect-Video-Profil width/height statt des Presets
+    // (geklemt 360p..4K, gerade Maße; siehe backend::sessions).
+    window.push(text_row(
+        "video-custom-width",
+        "Custom resolution width",
+        Some(
+            "Stream-Auflösung bei Window type = Custom Resolution (geklemt 640–3840, \
+             gerade Maße) — wirksam beim nächsten Session-Start",
         ),
-        "Custom-Auflösung wird vom Stream-Fenster nicht gelesen",
+        "width pixels",
+        window_custom,
+        s.custom_resolution_width().to_string(),
+        "1920",
+        focus_for(cx, "video-custom-width"),
+        |v, s| {
+            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
+            s.set_custom_resolution_width(digits.parse().unwrap_or(0));
+        },
     ));
-    window.push(inactive(
-        text_row(
-            "video-custom-height",
-            "Custom resolution height",
-            None,
-            "height pixels",
-            window_custom,
-            s.custom_resolution_height().to_string(),
-            "1080",
-            focus_for(cx, "video-custom-height"),
-            |v, s| {
-                let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
-                s.set_custom_resolution_height(digits.parse().unwrap_or(0));
-            },
+    window.push(text_row(
+        "video-custom-height",
+        "Custom resolution height",
+        Some(
+            "Stream-Auflösung bei Window type = Custom Resolution (geklemt 360–2160, \
+             gerade Maße) — wirksam beim nächsten Session-Start",
         ),
-        "Custom-Auflösung wird vom Stream-Fenster nicht gelesen",
+        "height pixels",
+        window_custom,
+        s.custom_resolution_height().to_string(),
+        "1080",
+        focus_for(cx, "video-custom-height"),
+        |v, s| {
+            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
+            s.set_custom_resolution_height(digits.parse().unwrap_or(0));
+        },
     ));
     window.push(inactive(
         toggle_row(
@@ -138,22 +139,56 @@ pub(crate) fn sections(
         ),
         "Cursor-Hiding im Stream-Fenster nicht portiert",
     ));
-    window.push(inactive(
-        select_row(
-            "video-zoom-factor",
-            "Zoom factor",
-            Some("Content zoom inside the stream window"),
-            "zoom scale content",
-            true,
-            zoom_options(),
-            &zoom_value(s.zoom_factor()),
-            |v, s| s.set_zoom_factor(v.parse().unwrap_or(-1.0)),
+    // Benutzerdefinierter Zoom (settings/zoom_factor): > 0 startet den Stream
+    // im Zoom-Modus mit Fit-Skala × Faktor; linker Anschlag (−1) = Auto/aus.
+    let zoom_factor = s.zoom_factor();
+    window.push(slider_row(
+        "video-zoom-factor",
+        "Zoom factor",
+        Some(
+            "Benutzerdefinierter Zoom beim Stream-Start (passend × Faktor) — \
+             linker Anschlag = Auto/aus",
         ),
-        "Zoom läuft zur Laufzeit über das Stream-HUD — der Key wird nicht gelesen",
+        "zoom scale content custom",
+        true,
+        if zoom_factor > 0.0 { zoom_factor } else { -1.0 },
+        -1.0,
+        3.0,
+        0.25,
+        if zoom_factor > 0.0 {
+            format!("{} %", (zoom_factor * 100.0).round() as i64)
+        } else {
+            "Auto/aus".to_string()
+        },
+        |v, s| {
+            // Alles unter 1.0 gilt als Auto/aus (Key wird auf -1 gesetzt).
+            s.set_zoom_factor(if v < 1.0 { -1.0 } else { (v * 100.0).round() / 100.0 });
+        },
     ));
 
     let backend_opengl = s.render_backend() == RenderBackend::OpenGL;
     let mut rendering = Section::new("Rendering");
+    // Video-Ausgabe (GPU-Pfad, settings/video_output): "gpu" erzwingt das
+    // D3D11-Sink-Fenster (Zero-Copy), "cpu" den Kompatibilitäts-Pfad,
+    // "auto" nur bei Zero-Copy-Kombination — wirksam beim nächsten
+    // Session-Start.
+    rendering.push(select_row(
+        "video-output",
+        "Video-Ausgabe",
+        Some(
+            "gpu = D3D11-Zero-Copy (empfohlen), cpu = Kompatibilitätspfad, \
+             auto = automatisch — wirksam beim nächsten Session-Start",
+        ),
+        "video output gpu cpu d3d11 zero copy sink",
+        true,
+        opts(&[
+            ("auto", "Auto"),
+            ("gpu", "GPU (D3D11-Zero-Copy)"),
+            ("cpu", "CPU (Kompatibilität)"),
+        ]),
+        &s.video_output(),
+        |v, s| s.set_video_output(v),
+    ));
     rendering.push(select_row(
         "video-hw-decoder",
         "Hardware decoder",
@@ -323,6 +358,26 @@ pub(crate) fn sections(
         ]),
         &s.nv_vsr_scale().to_string(),
         |v, s| s.set_nv_vsr_scale(v.parse().unwrap_or(0)),
+    ));
+    // QualityLevel des VSR-Netzes (SDK: 1 low, 2 medium, 3 high); Auto
+    // entspricht dem C++-Verhalten (high ab 3x Scale, sonst medium).
+    vsr_section.push(select_row(
+        "video-nv-vsr-quality",
+        "VSR-Qualität",
+        Some(
+            "Qualität des VSR-Netzes — Auto = wie im C++-Client \
+             (High ab 3x Upscale, sonst Medium)",
+        ),
+        "vsr quality level ai netz",
+        vsr,
+        opts(&[
+            ("0", "Auto"),
+            ("1", "Low"),
+            ("2", "Medium"),
+            ("3", "High"),
+        ]),
+        &s.nv_vsr_quality().to_string(),
+        |v, s| s.set_nv_vsr_quality(v.parse().unwrap_or(0)),
     ));
     vsr_section.push(text_row(
         "video-nv-vsr-sdk-path",
@@ -540,28 +595,6 @@ fn indexed_options(labels: &'static [&'static str]) -> Vec<SelectOption> {
         .map(|(i, label)| SelectOption::new(i.to_string(), *label))
         .collect()
 }
-
-fn zoom_options() -> Vec<SelectOption> {
-    let mut options = vec![SelectOption::new("-1", "Follow console (Auto)")];
-    let mut percent = 50;
-    while percent <= 300 {
-        options.push(SelectOption::new(
-            format!("{:.2}", percent as f64 / 100.0),
-            format!("{percent} %"),
-        ));
-        percent += 25;
-    }
-    options
-}
-
-fn zoom_value(factor: f64) -> String {
-    if factor < 0.0 {
-        "-1".to_string()
-    } else {
-        format!("{factor:.2}")
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Fine-Tuning-Sektionen (placebo_render_params.ini → placebo_settings/*)
 // ---------------------------------------------------------------------------

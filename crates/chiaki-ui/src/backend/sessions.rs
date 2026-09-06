@@ -248,6 +248,9 @@ pub(crate) struct MediaSettings {
     pub hw_backend: HwBackend,
     pub nv_vsr: bool,
     pub nv_vsr_scale: u32,
+    /// `settings/nv_vsr_quality` — `None` = Auto (C++: Qualität aus dem
+    /// Scale-Faktor ableiten), `Some(1..=3)` = fixes SDK-QualityLevel.
+    pub nv_vsr_quality: Option<u32>,
     pub nv_vsr_sdk_path: Option<PathBuf>,
     pub audio_out_device: Option<String>,
     /// `settings/audio_volume` 0..=128 (SDL-Skala).
@@ -298,6 +301,11 @@ impl MediaSettings {
         // Default 200, statt VSR still zu deaktivieren.
         let scale_raw = settings.nv_vsr_scale().clamp(0, i64::from(u32::MAX)) as u32;
         let nv_vsr_scale = if (100..=400).contains(&scale_raw) { scale_raw } else { 200 };
+        // QualityLevel (0 = Auto → wie im C++ aus dem Scale abgeleitet).
+        let nv_vsr_quality = match settings.nv_vsr_quality() {
+            1..=3 => Some(settings.nv_vsr_quality() as u32),
+            _ => None,
+        };
         let out_dev = settings.audio_out_device();
         let in_dev = settings.audio_in_device();
         MediaSettings {
@@ -306,6 +314,7 @@ impl MediaSettings {
             hw_backend: hw,
             nv_vsr,
             nv_vsr_scale,
+            nv_vsr_quality,
             nv_vsr_sdk_path: {
                 let p = settings.nv_vsr_sdk_path();
                 if p.trim().is_empty() { None } else { Some(PathBuf::from(p)) }
@@ -481,13 +490,33 @@ pub fn map_disable_audio_video(
 
 /// Video-Profil aus den Settings je ps4/ps5 × local/remote
 /// (settings.video_profile_*_ps* kapseln resolution/fps/bitrate/codec).
+/// Bei `settings/window_type == Custom Resolution` überschreiben
+/// `custom_resolution_width/length` die Preset-Auflösung (geklemt 360p–4K,
+/// gerade Maße — [`apply_custom_resolution`]).
 pub fn video_profile_for(req: &ConnectRequest, settings: &Settings) -> chiaki_settings::settings::ConnectVideoProfile {
-    match (req.ps5, req.link) {
+    let mut profile = match (req.ps5, req.link) {
         (false, LinkQuality::Local) => settings.video_profile_local_ps4(),
         (false, LinkQuality::Remote) => settings.video_profile_remote_ps4(),
         (true, LinkQuality::Local) => settings.video_profile_local_ps5(),
         (true, LinkQuality::Remote) => settings.video_profile_remote_ps5(),
+    };
+    apply_custom_resolution(settings, &mut profile);
+    profile
+}
+
+/// `settings/window_type == Custom Resolution` → width/height aus den
+/// Custom-Keys (geklemt 640×360..3840×2160, auf gerade Maße gerundet —
+/// H.264/H.265 brauchen nichts Ungewöhnliches, die Konsole gerundet ebenfalls).
+/// fps/bitrate/codec bleiben aus der Preset-Gruppe (Bitrate-Override greift
+/// wie bisher über die video_profile_*-Getter).
+fn apply_custom_resolution(settings: &Settings, profile: &mut chiaki_settings::settings::ConnectVideoProfile) {
+    if settings.window_type() != chiaki_settings::settings::WindowType::CustomResolution {
+        return;
     }
+    let width = settings.custom_resolution_width().clamp(640, 3840) as u32 & !1;
+    let height = settings.custom_resolution_height().clamp(360, 2160) as u32 & !1;
+    profile.width = width;
+    profile.height = height;
 }
 
 /// Port der C++-StreamSession-Keyboard-Vorbereitung: `GetControllerMapping()`
@@ -1769,7 +1798,13 @@ struct MediaTimings {
                                     decoder.cuda_context().unwrap_or(std::ptr::null_mut());
                                 let stream =
                                     decoder.cuda_stream().unwrap_or(std::ptr::null_mut());
-                                vsr_inited = up.init(&frame, ctx, stream, settings.nv_vsr_scale);
+                                vsr_inited = up.init(
+                                    &frame,
+                                    ctx,
+                                    stream,
+                                    settings.nv_vsr_scale,
+                                    settings.nv_vsr_quality,
+                                );
                                 session
                                     .telemetry
                                     .vsr_active
@@ -2388,6 +2423,53 @@ mod tests {
         settings.set_nv_vsr_enabled(false);
         let media = MediaSettings::from_settings(&req, &settings);
         assert_eq!(media.hw_backend, HwBackend::None, "hw_decoder-Setting greift ohne VSR");
+    }
+
+    #[test]
+    fn media_settings_mappt_vsr_quality() {
+        let req = ConnectRequest::from_address("10.0.0.1".into(), true, LinkQuality::Local);
+        let mut settings = test_settings();
+        assert_eq!(
+            MediaSettings::from_settings(&req, &settings).nv_vsr_quality,
+            None,
+            "Default 0 = Auto (C++-Verhalten)"
+        );
+        settings.set_nv_vsr_quality(3);
+        assert_eq!(
+            MediaSettings::from_settings(&req, &settings).nv_vsr_quality,
+            Some(3)
+        );
+        settings.set_nv_vsr_quality(0);
+        assert_eq!(MediaSettings::from_settings(&req, &settings).nv_vsr_quality, None);
+    }
+
+    #[test]
+    fn custom_resolution_nur_bei_window_type_custom() {
+        let mut settings = test_settings();
+        let req = ConnectRequest::from_address("10.0.0.1".into(), true, LinkQuality::Local);
+
+        settings.set_window_type(chiaki_settings::settings::WindowType::CustomResolution);
+        settings.set_custom_resolution_width(1921);
+        settings.set_custom_resolution_height(1079);
+        let p = video_profile_for(&req, &settings);
+        assert_eq!(
+            (p.width, p.height),
+            (1920, 1078),
+            "ungerade Maße werden gerade gemacht"
+        );
+
+        // Klemmung 360p..4K.
+        settings.set_custom_resolution_width(8000);
+        settings.set_custom_resolution_height(200);
+        let p = video_profile_for(&req, &settings);
+        assert_eq!((p.width, p.height), (3840, 360));
+
+        // Ohne Custom-Resolution bleibt das Preset (PS5 local = 1080p).
+        settings.set_window_type(chiaki_settings::settings::WindowType::AdjustableResolution);
+        settings.set_custom_resolution_width(1000);
+        settings.set_custom_resolution_height(600);
+        let p = video_profile_for(&req, &settings);
+        assert_eq!((p.width, p.height), (1920, 1080));
     }
 
     #[test]

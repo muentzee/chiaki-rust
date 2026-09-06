@@ -498,6 +498,9 @@ pub(crate) fn console_tile(
                 )
                 .child(
                     div()
+                        // Feste 240-px-Kachel: lange Konsolennamen bekommen
+                        // eine Ellipse statt eines hässlichen Wortumbruchs.
+                        .truncate()
                         .text_size(px(theme::SIZE_HEADLINE))
                         .font_weight(FontWeight(theme::WEIGHT_HEADLINE))
                         .text_color(theme::TEXT_PRIMARY)
@@ -508,8 +511,14 @@ pub(crate) fn console_tile(
                         .flex()
                         .flex_col()
                         .gap(px(theme::SP_1))
+                        .min_w_0()
                         .child(
                             div()
+                                // gpui-0.2.2-Quirk: `text_ellipsis` ellipsiert in
+                                // verschachtelten Flex-Spalten bereits bei kurzen
+                                // Texten — deshalb hier nur Clip + Einzeilig.
+                                .overflow_hidden()
+                                .whitespace_nowrap()
                                 .text_size(px(theme::SIZE_CAPTION))
                                 .text_color(theme::TEXT_SECONDARY)
                                 .child(if entry.addr.is_empty() {
@@ -523,9 +532,12 @@ pub(crate) fn console_tile(
                                 .flex()
                                 .items_center()
                                 .gap_1()
+                                .min_w_0()
                                 .child(icons::icon(icons::paths::PULSE, 12.0, theme::SUCCESS))
                                 .child(
                                     div()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
                                         .text_size(px(theme::SIZE_CAPTION))
                                         .text_color(theme::TEXT_PRIMARY)
                                         .child(app),
@@ -716,6 +728,11 @@ fn hero_card(
                         .child(StatusBadge::new(entry.status).label(entry.status_label))
                         .child(
                             div()
+                                // Einzeilig halten; gpui-0.2.2-Quirk: siehe
+                                // console_tile (text_ellipsis ellipsiert in
+                                // Flex-Spalten verfrüht) → nur Clip.
+                                .overflow_hidden()
+                                .whitespace_nowrap()
                                 .text_size(px(theme::SIZE_DISPLAY))
                                 .font_weight(FontWeight(theme::WEIGHT_DISPLAY))
                                 .text_color(theme::TEXT_PRIMARY)
@@ -723,6 +740,8 @@ fn hero_card(
                         )
                         .child(
                             div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
                                 .text_size(px(theme::SIZE_CAPTION))
                                 .text_color(theme::TEXT_SECONDARY)
                                 .child(context_line),

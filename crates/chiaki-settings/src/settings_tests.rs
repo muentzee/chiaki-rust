@@ -224,6 +224,8 @@ fn set_save_load_roundtrip() {
     s.set_reorder_timeout_ms(42);
     s.set_nv_vsr_enabled(true);
     s.set_nv_vsr_scale(300);
+    s.set_nv_vsr_quality(3);
+    s.set_stick_deadzone(25);
     s.set_nv_vsr_sdk_path("C:/VFX/bin".into());
     s.set_zoom_factor(1.25);
     s.set_packet_loss_reported_max(0.12);
@@ -258,6 +260,8 @@ fn set_save_load_roundtrip() {
     assert_eq!(s2.reorder_timeout_ms(), 42);
     assert!(s2.nv_vsr_enabled());
     assert_eq!(s2.nv_vsr_scale(), 300);
+    assert_eq!(s2.nv_vsr_quality(), 3);
+    assert_eq!(s2.stick_deadzone(), 25);
     assert_eq!(s2.nv_vsr_sdk_path(), "C:/VFX/bin");
     assert_eq!(s2.zoom_factor(), 1.25);
     assert_eq!(s2.packet_loss_reported_max(), 0.12);
@@ -296,6 +300,24 @@ fn set_save_load_roundtrip() {
     let s4 = Settings::open_at(test_paths(&base)).unwrap();
     assert!(s4.streamer_mode());
     assert!(!s4.keyboard_enabled());
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn nv_vsr_quality_and_stick_deadzone_default_and_clamp() {
+    let base = temp_base("quality-deadzone");
+    let mut s = Settings::open_at(test_paths(&base)).unwrap();
+
+    assert_eq!(s.nv_vsr_quality(), 0, "Default 0 = Auto (C++-Verhalten)");
+    assert_eq!(s.stick_deadzone(), 0, "Default 0 = aus (wie im C++-Client)");
+
+    s.set_nv_vsr_quality(9);
+    assert_eq!(s.nv_vsr_quality(), 3, "auf den SDK-Bereich geklemmt");
+    s.set_stick_deadzone(80);
+    assert_eq!(s.stick_deadzone(), 50);
+    s.set_stick_deadzone(-5);
+    assert_eq!(s.stick_deadzone(), 0);
 
     let _ = std::fs::remove_dir_all(&base);
 }

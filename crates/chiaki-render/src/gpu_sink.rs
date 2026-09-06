@@ -114,6 +114,9 @@ struct SinkShared {
     hwnd: std::sync::Mutex<isize>,
     overlay_title: String,
     zoom: Mutex<SinkZoom>,
+    /// „Benutzerdefinierter Zoom“ (settings/zoom_factor; 0 = aus) — wirkt
+    /// nur im Zoom-Modus (Fit-Skala × Faktor, siehe `sys::draw_and_present`).
+    zoom_factor: Mutex<f32>,
     slot: Mutex<Option<FrameInput>>,
     /// Serialisiert CUDA-Interop-Mapping (Media-Thread) gegen das Zeichnen
     /// (Render-Thread) auf der BGRA-Textur.
@@ -264,6 +267,12 @@ impl GpuSinkHandle {
         *self.shared.zoom.lock().unwrap() = zoom;
     }
 
+    /// „Benutzerdefinierter Zoom“ (settings/zoom_factor; 0 = aus). Wirkt nur
+    /// im Zoom-Modus: Fit-Skala × Faktor statt füllender Skala.
+    pub fn set_zoom_factor(&self, factor: f32) {
+        *self.shared.zoom_factor.lock().unwrap() = factor.max(0.0);
+    }
+
     fn wake(&self) {
         let hwnd = *self.shared.hwnd.lock().unwrap();
         if hwnd == 0 {
@@ -302,6 +311,7 @@ impl GpuSink {
             hwnd: Mutex::new(0),
             overlay_title: overlay_title.to_string(),
             zoom: Mutex::new(SinkZoom::Fit),
+            zoom_factor: Mutex::new(0.0),
             slot: Mutex::new(None),
             interop_lock: Mutex::new(()),
             stats: SinkStats::default(),
@@ -434,12 +444,14 @@ fn render_thread(hwnd: HWND, overlay_title: &str, shared: Arc<SinkShared>) {
     // sonst könnte ein uninitialisierter Backbuffer sichtbar werden.
     {
         let zoom = *shared.zoom.lock().unwrap();
+        let zoom_factor = *shared.zoom_factor.lock().unwrap();
         let _ = sys::draw_and_present(
             &state.d3d,
             &state.shaders,
             DrawSource::Nv12(&state.nv12.srv_y, &state.nv12.srv_uv),
             texture_size_of(&state.nv12.texture).unwrap_or((1280, 720)),
             zoom.into(),
+            zoom_factor,
         );
     }
 
@@ -507,24 +519,27 @@ fn render_thread(hwnd: HWND, overlay_title: &str, shared: Arc<SinkShared>) {
             // Nach Resize: Backbuffer ist leer → einmal sofort zeichnen, damit
             // kein schwarzes Flackern zwischen Resize und nächstem Frame bleibt.
             let zoom = *shared.zoom.lock().unwrap();
+            let zoom_factor = *shared.zoom_factor.lock().unwrap();
             let source = match state.active_source {
                 ActiveSource::Nv12 => DrawSource::Nv12(&state.nv12.srv_y, &state.nv12.srv_uv),
                 ActiveSource::Rgba => DrawSource::Rgba(&state.rgba.srv),
             };
             let desc = texture_size_of(&state.nv12.texture).unwrap_or((1280, 720));
-            let _ = sys::draw_and_present(&state.d3d, &state.shaders, source, desc, zoom.into());
+            let _ =
+                sys::draw_and_present(&state.d3d, &state.shaders, source, desc, zoom.into(), zoom_factor);
         }
 
         if dirty {
             let started = Instant::now();
             let zoom = *shared.zoom.lock().unwrap();
+            let zoom_factor = *shared.zoom_factor.lock().unwrap();
             let source = match state.active_source {
                 ActiveSource::Nv12 => DrawSource::Nv12(&state.nv12.srv_y, &state.nv12.srv_uv),
                 ActiveSource::Rgba => DrawSource::Rgba(&state.rgba.srv),
             };
             // Video-Auflösung für den Letterbox-Viewport aus den Input-Texturen.
             let desc = texture_size_of(&state.nv12.texture).unwrap_or((1280, 720));
-            match sys::draw_and_present(&state.d3d, &state.shaders, source, desc, zoom.into()) {
+            match sys::draw_and_present(&state.d3d, &state.shaders, source, desc, zoom.into(), zoom_factor) {
                 Ok(()) => {
                     shared.stats.frames_presented.fetch_add(1, Ordering::Relaxed);
                     let us = started.elapsed().as_micros() as u64;

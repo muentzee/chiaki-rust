@@ -107,6 +107,9 @@ impl RenderOnce for Button {
             .items_center()
             .justify_center()
             .gap_2()
+            // Labels bleiben einzeilig (gpui bricht Text sonst an jeder
+            // Grenze um — z. B. „Ruhemodus (Konsole)“ im schmalen HUD-Panel).
+            .whitespace_nowrap()
             .rounded(px(theme::RADIUS_MD))
             .px(px(theme::SP_4))
             .py(px(theme::SP_2))
@@ -221,13 +224,17 @@ impl RenderOnce for IconButton {
             .when_some(self.focus, |el, fh| {
                 el.track_focus(&fh).focus(move |s| s.border_2().border_color(theme::ACCENT))
             })
-            // Tooltip-artiges Label unter dem Icon (Spec: „Keine Icons ohne Label")
+            // Tooltip-artiges Label unter dem Icon (Spec: „Keine Icons ohne Label").
+            // nowrap: Die feste Kachel (56/40 px) darf das Label nicht
+            // mitten im Wort umbrechen („Einstellunge/n", „Optione/n (H)“) —
+            // es darf mittig überstehen (overflow ist nicht geclippt).
             .child(icon)
             .child(
                 div()
                     .text_size(px(10.0))
                     .font_weight(FontWeight(theme::WEIGHT_CAPTION))
                     .text_color(tint)
+                    .whitespace_nowrap()
                     .child(self.label),
             )
     }

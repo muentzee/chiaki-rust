@@ -684,12 +684,18 @@ pub enum ZoomMode {
 
 /// Fullscreen-Dreieck + Letterbox-Viewport + Draw + Present (SyncInterval 0).
 /// Läuft ausschließlich im Render-Thread.
+///
+/// `zoom_factor` (settings/zoom_factor, 0 = aus): bei ZoomMode::Zoom wird
+/// statt der füllenden Skala die **Fit-Skala × Faktor** verwendet
+/// („Benutzerdefinierter Zoom" — Faktor ≥ 1 croppt um den Overhang);
+/// Fit/Stretch sind unverändert.
 pub fn draw_and_present(
     d3d: &D3d11,
     shaders: &Shaders,
     source: DrawSource<'_>,
     video_size: (u32, u32),
     zoom: ZoomMode,
+    zoom_factor: f32,
 ) -> SysResult<()> {
     let (vw, vh) = (video_size.0.max(1) as f32, video_size.1.max(1) as f32);
     let (ww, wh) = (d3d.width.max(1) as f32, d3d.height.max(1) as f32);
@@ -703,7 +709,11 @@ pub fn draw_and_present(
             ((ww - w) / 2.0, (wh - h) / 2.0, w, h)
         }
         ZoomMode::Zoom => {
-            let scale = (ww / vw).max(wh / vh);
+            let scale = if zoom_factor > 1.0 {
+                (ww / vw).min(wh / vh) * zoom_factor
+            } else {
+                (ww / vw).max(wh / vh)
+            };
             let (w, h) = (vw * scale, vh * scale);
             ((ww - w) / 2.0, (wh - h) / 2.0, w, h)
         }

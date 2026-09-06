@@ -36,6 +36,7 @@ pub(crate) fn sections(
     ];
     let rumble = rumble_value(s.rumble_haptics_intensity());
     let haptic = s.haptic_override();
+    let deadzone = s.stick_deadzone();
     drop(s);
 
     let mut keyboard_section = Section::new("Keyboard");
@@ -140,6 +141,24 @@ pub(crate) fn sections(
         true,
         buttons_by_pos,
     ), "Positions-basiertes Button-Mapping im Input-Backend nicht umgesetzt"));
+    // Stick-Deadzone: wird live im Stream-Input-Loop auf den kombinierten
+    // Controller-State angewendet (Rescale oberhalb der Zone; 0 = aus).
+    controller.push(slider_row(
+        "controls-stick-deadzone",
+        "Stick deadzone",
+        Some(
+            "Tote Zone der Analog-Sticks in Prozent — Ausschläge darunter werden \
+             ignoriert, darüber neu skaliert (0 = aus)",
+        ),
+        "deadzone stick axis analog drift",
+        true,
+        deadzone as f64,
+        0.0,
+        50.0,
+        1.0,
+        format!("{deadzone} % (0 = aus)"),
+        |v, s| s.set_stick_deadzone(v.round() as i64),
+    ));
 
     let mut dpad = Section::new("Dpad Touchpad Emulation");
     dpad.push(inactive(toggle_row(

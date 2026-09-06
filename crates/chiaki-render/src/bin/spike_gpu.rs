@@ -549,7 +549,7 @@ fn phase_cuda_vsr(seconds: u64, shared: &Arc<OverlayShared>) -> PhaseOutcome {
                 let stream = decoder.cuda_stream().unwrap_or(std::ptr::null_mut());
                 eprintln!("[phase3] VSR init start (ctx non-null: {})", !ctx.is_null());
                 let mut up = VsrUpscaler::new(sdk.clone());
-                if !up.init(frame, ctx, stream, 200) {
+                if !up.init(frame, ctx, stream, 200, None) {
                     setup_error = Some(format!(
                         "VSR-Init fehlgeschlagen: {:?}",
                         up.last_error().unwrap_or("?")
