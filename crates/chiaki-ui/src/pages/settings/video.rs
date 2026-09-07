@@ -596,20 +596,24 @@ pub(crate) fn sections(
             true,
             "Stop headless feed",
             false,
-            |_shell, cx| {
+            |shell, cx| {
+                // WICHTIG: shell.push_toast (NICHT super::push_toast) — wir
+                // sind bereits in shell.update() (action_row-Wrapper); ein
+                // zweites update() auf dieselbe Entity panickt (gpui
+                // Re-Entry, siehe HANDOFF Fix-Runde 7) und reißt die App ab.
                 if chiaki_virtualcam::request_stop() {
-                    super::push_toast(
+                    shell.push_toast(
+                        ToastData::new(ToastKind::Info, "Headless-Feed").message(
+                            "Stop-Signal gesendet — die Session wird sauber beendet",
+                        ),
                         cx,
-                        ToastKind::Info,
-                        "Headless-Feed",
-                        "Stop-Signal gesendet — die Session wird sauber beendet",
                     );
                 } else {
-                    super::push_toast(
+                    shell.push_toast(
+                        ToastData::new(ToastKind::Warn, "Headless-Feed").message(
+                            "Läuft nicht mehr (Stop-Event nicht gefunden)",
+                        ),
                         cx,
-                        ToastKind::Warn,
-                        "Headless-Feed",
-                        "Läuft nicht mehr (Stop-Event nicht gefunden)",
                     );
                 }
             },
@@ -628,54 +632,18 @@ pub(crate) fn sections(
             "Start headless feed now",
             false,
             |shell, cx| {
-                if shell.backend.sessions().active().is_some() {
-                    super::push_toast(
+                // shell.push_toast statt super::push_toast (Re-Entry, siehe oben).
+                match crate::backend::vcam::start_headless_now(&shell.backend) {
+                    Ok(pid) => shell.push_toast(
+                        ToastData::new(ToastKind::Success, "Headless-Feed gestartet").message(
+                            format!("Fensterlose Session läuft (PID {pid}) — Kamera in OBS/Discord prüfen"),
+                        ),
                         cx,
-                        ToastKind::Warn,
-                        "Headless-Feed",
-                        "Erst die laufende Session trennen — Konsole und Stream sind belegt",
-                    );
-                    return;
-                }
-                match resolve_headless_host(shell) {
-                    Ok(addr) => {
-                        let exe = std::env::current_exe().unwrap_or_default();
-                        let mut spawn = std::process::Command::new(exe);
-                        spawn.arg("--virtualcam").arg(&addr);
-                        #[cfg(windows)]
-                        {
-                            use std::os::windows::process::CommandExt as _;
-                            // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP — der
-                            // Feed überlebt das Schließen dieses Fensters.
-                            spawn.creation_flags(0x0000_0008 | 0x0000_0200);
-                        }
-                        match spawn.spawn() {
-                            Ok(_child) => super::push_toast(
-                                cx,
-                                ToastKind::Success,
-                                "Headless-Feed gestartet",
-                                "Fensterlose Session läuft — Kamera in OBS/Discord prüfen",
-                            ),
-                            Err(err) => {
-                                tracing::error!("Headless-Spawn fehlgeschlagen: {err}");
-                                super::push_toast(
-                                    cx,
-                                    ToastKind::Warn,
-                                    "Headless-Feed",
-                                    "Konnte nicht gestartet werden — Details im Log",
-                                );
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!("Headless-Start: {err}");
-                        super::push_toast(
-                            cx,
-                            ToastKind::Warn,
-                            "Headless-Feed",
-                            "Kein Host auflösbar — manuellen Host anlegen oder Konsole einschalten",
-                        );
-                    }
+                    ),
+                    Err(err) => shell.push_toast(
+                        ToastData::new(ToastKind::Warn, "Headless-Feed").message(err),
+                        cx,
+                    ),
                 }
             },
         ));
@@ -851,37 +819,7 @@ pub(crate) fn sections(
 
     sections
 }
-
-/// Host-Adresse für den Headless-Start auflösen (gleiche Reihenfolge wie
-/// `virtualcam_headless::resolve_host`, plus Discovery-Fallback): manueller
-/// Host mit zugeordnetem registrierten Host zuerst; andernfalls genau eine
-/// registrierte + eine gefundene Konsole (typischer 1-Konsole-Haushalt).
-fn resolve_headless_host(shell: &AppShell) -> Result<String, String> {
-    let settings = shell.backend.settings().lock().unwrap_or_else(|e| e.into_inner());
-    let registered = settings.registered_hosts();
-    let manual = settings.manual_hosts();
-    for r in &registered {
-        if let Some(m) = manual
-            .iter()
-            .find(|m| m.registered && m.registered_mac.mac() == r.server_mac.mac())
-        {
-            return Ok(m.host.clone());
-        }
-    }
-    let discovered = shell.backend.discovery().hosts();
-    if registered.len() == 1 && discovered.len() == 1 {
-        let addr = discovered[0].host_addr.clone();
-        tracing::info!(
-            "Headless-Start: manueller Host fehlt — Discovery-Fallback → {addr}"
-        );
-        return Ok(addr);
-    }
-    Err(
-        "Kein zugeordneter manueller Host und keine eindeutige Discovery-Adresse".to_string(),
-    )
-}
-
-/// Index-basierte Select-Optionen (Wert = Index-String, z. B. Display-Enums).
+// Index-basierte Select-Optionen (Wert = Index-String, z. B. Display-Enums).
 fn indexed_options(labels: &'static [&'static str]) -> Vec<SelectOption> {
     labels
         .iter()

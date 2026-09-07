@@ -329,10 +329,31 @@ pub(crate) fn connect_entry(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut
         wake_entry(shell, entry, cx);
         return;
     }
-    // NUR navigieren — den Session-Start besitzt die Stream-Ansicht allein
-    // (resolve_request + connect_started-Guard). Ein connect() hier würde
-    // (a) den UI-Thread blockieren und (b) einen ZWEITEN Start neben dem der
-    // Stream-Ansicht erzeugen (zwei Sessions konkurrieren um die Konsole).
+    // Virtual-Cam-Popup (settings/virtualcam_enabled): statt direkt zu
+    // verbinden fragt ein Dialog, wie gestartet werden soll — normaler
+    // Stream im Fenster oder fensterloser Headless-Feed in die virtuelle
+    // Kamera (User-Vorgabe HANDOFF §8).
+    let vcam_popup = {
+        let settings = shell
+            .backend
+            .settings()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        settings.virtualcam_enabled()
+    };
+    if vcam_popup {
+        open_vcam_choice(shell, entry, cx);
+        return;
+    }
+    connect_normal(shell, entry, cx);
+}
+
+/// Normaler LAN-Stream (Fenster-Modus): NUR navigieren — den Session-Start
+/// besitzt die Stream-Ansicht allein (resolve_request + connect_started-
+/// Guard). Ein connect() hier würde (a) den UI-Thread blockieren und (b)
+/// einen ZWEITEN Start neben dem der Stream-Ansicht erzeugen (zwei
+/// Sessions konkurrieren um die Konsole).
+fn connect_normal(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut Context<AppShell>) {
     let host_id = match (entry.registered.as_ref(), entry.manual.as_ref(), entry.duid.as_ref()) {
         (Some(registered), _, _) => HostId::Registered { mac: *registered.server_mac.mac() },
         (_, Some(manual), _) => HostId::Manual { id: manual.id },
@@ -350,6 +371,97 @@ pub(crate) fn connect_entry(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut
         cx,
     );
     shell.navigate(Route::Stream(host_id), cx);
+}
+
+/// Virtual-Cam-Auswahl (settings/virtualcam_enabled an + Kachel-Klick):
+/// Dialog „Normal streamen / Headless-Feed starten (/ stoppen)“. Der
+/// Headless-Feed läuft als detachierter Prozess weiter, das Chiaki-Fenster
+/// bleibt offen und kann ihn über diesen Dialog bzw. die Settings stoppen.
+fn open_vcam_choice(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut Context<AppShell>) {
+    let weak = cx.entity().downgrade();
+    let running = chiaki_virtualcam::is_running();
+    let body = if running {
+        format!(
+            "Der fensterlose Kamera-Feed läuft bereits. „{}“ zusätzlich normal streamen oder den Feed stoppen?",
+            entry.name
+        )
+    } else {
+        format!(
+            "Wie soll „{}“ gestartet werden? Der fensterlose Feed spielt in die virtuelle Kamera (mit VSR, wenn aktiv) und der Ton bleibt lokal — ohne sichtbares Chiaki-Fenster.",
+            entry.name
+        )
+    };
+    let entry_normal = entry.clone();
+    let mut dialog = Dialog::new("vcam-choice", "Virtuelle Kamera", body).button(
+        DialogButton::new("Normal streamen", ButtonVariant::Primary).action(move |_window, cx| {
+            let _ = weak.update(cx, |shell, cx| connect_normal(shell, &entry_normal, cx));
+        }),
+    );
+    let weak_stop = cx.entity().downgrade();
+    let entry_start = entry.clone();
+    if running {
+        dialog = dialog.button(
+            DialogButton::new("Headless-Feed stoppen", ButtonVariant::Danger).action(
+                move |_window, cx| {
+                    let _ = weak_stop.update(cx, |shell, cx| {
+                        if crate::backend::vcam::stop_headless() {
+                            shell.push_toast(
+                                crate::components::ToastData::new(
+                                    crate::components::ToastKind::Info,
+                                    "Headless-Feed",
+                                )
+                                .message("Stop-Signal gesendet — die Session wird sauber beendet"),
+                                cx,
+                            );
+                        } else {
+                            shell.push_toast(
+                                crate::components::ToastData::new(
+                                    crate::components::ToastKind::Warn,
+                                    "Headless-Feed",
+                                )
+                                .message("Läuft nicht mehr"),
+                                cx,
+                            );
+                        }
+                    });
+                },
+            ),
+        );
+    } else {
+        dialog = dialog.button(
+            DialogButton::new("Headless starten", ButtonVariant::Ghost).action(
+                move |_window, cx| {
+                    let _ = weak_stop.update(cx, |shell, cx| {
+                        match crate::backend::vcam::start_headless_now_with_addr(
+                            &shell.backend,
+                            &entry_start.addr,
+                        ) {
+                            Ok(pid) => shell.push_toast(
+                                crate::components::ToastData::new(
+                                    crate::components::ToastKind::Success,
+                                    "Headless-Feed gestartet",
+                                )
+                                .message(format!(
+                                    "Fensterlose Session läuft (PID {pid}) — Kamera in OBS/Discord prüfen"
+                                )),
+                                cx,
+                            ),
+                            Err(err) => shell.push_toast(
+                                crate::components::ToastData::new(
+                                    crate::components::ToastKind::Warn,
+                                    "Headless-Feed",
+                                )
+                                .message(err),
+                                cx,
+                            ),
+                        }
+                    });
+                },
+            ),
+        );
+    }
+    let dialog = dialog.button(DialogButton::new("Abbrechen", ButtonVariant::Ghost));
+    shell.push_dialog(dialog, cx);
 }
 
 /// Kontextmenü einer Kachel (Spec: Aufwachen, Verstecken, Registrierung

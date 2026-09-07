@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod events;
 pub mod psn;
 pub mod sessions;
+pub mod vcam;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,6 +25,7 @@ pub use sessions::{
     ActiveSession, ConnectRequest, LinkQuality, RegistHandle, RegistRequest, RegistState,
     SessionManager,
 };
+pub use vcam::{resolve_feed_addr, start_headless_now, start_headless_now_with_addr, stop_headless};
 
 use crate::components::ToastData;
 
