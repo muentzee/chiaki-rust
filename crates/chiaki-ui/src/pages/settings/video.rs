@@ -15,11 +15,11 @@ use chiaki_settings::settings::{
 use gpui::IntoElement as _;
 
 use crate::app::AppShell;
-use crate::components::SelectOption;
+use crate::components::{SelectOption, ToastData, ToastKind};
 
 use super::{
-    inactive, opts, select_row, slider_row, text_row, toggle_row, toggle_row_with, info_row,
-    Section, SRow,
+    action_row, inactive, opts, select_row, slider_row, text_row, toggle_row, toggle_row_with,
+    info_row, Section, SRow,
 };
 
 pub(crate) fn sections(
@@ -520,7 +520,8 @@ pub(crate) fn sections(
         "Virtual camera feed",
         Some(
             "Feeding the stream into the OBS Virtual Camera (Discord/OBS bind it as a webcam) — \
-             live during sessions only, effective from the next session start",
+             the stream window stays open; a windowless feed is the headless action below. \
+             Effective from the next session start",
         ),
         "virtual camera webcam obs discord stream feed",
         true,
@@ -561,7 +562,8 @@ pub(crate) fn sections(
         "Start with Windows (headless camera)",
         Some(
             "Registers the app with --virtualcam in the autostart (headless feed + audio, \
-             no window)",
+             no window). Note: this only takes effect at the next Windows login — \
+             use the action below to start the headless feed right now",
         ),
         "virtual camera autostart windows headless background",
         true,
@@ -573,6 +575,111 @@ pub(crate) fn sections(
             }
         },
     ));
+    // Headless-Feed JETZT starten/stoppen (separater, fensterloser Prozess
+    // mit Kamera — bei VSR mit VSR-Output — und lokalem Ton). Liveness
+    // über den Instanz-Mutex (auch nach hartem Kill korrekt).
+    let headless_running = chiaki_virtualcam::is_running();
+    if headless_running {
+        let pid = chiaki_virtualcam::ipc::running_pid(&chiaki_virtualcam::ipc::default_pid_path());
+        virtualcam.push(info_row(
+            &format!(
+                "Headless-Feed: running{} — windowless session with camera + local audio",
+                pid.map(|p| format!(" (PID {p})")).unwrap_or_default()
+            ),
+            "headless feed running status",
+        ));
+        virtualcam.push(action_row(
+            "video-virtualcam-headless-stop",
+            "Headless feed",
+            Some("Beendet die fensterlose Session sauber (Kamera schließt sich, Konsole bleibt an)"),
+            "headless feed stop beenden",
+            true,
+            "Stop headless feed",
+            false,
+            |_shell, cx| {
+                if chiaki_virtualcam::request_stop() {
+                    super::push_toast(
+                        cx,
+                        ToastKind::Info,
+                        "Headless-Feed",
+                        "Stop-Signal gesendet — die Session wird sauber beendet",
+                    );
+                } else {
+                    super::push_toast(
+                        cx,
+                        ToastKind::Warn,
+                        "Headless-Feed",
+                        "Läuft nicht mehr (Stop-Event nicht gefunden)",
+                    );
+                }
+            },
+        ));
+    } else {
+        virtualcam.push(action_row(
+            "video-virtualcam-headless-start",
+            "Headless feed",
+            Some(
+                "Startet jetzt eine separate, fensterlose Session: Stream in die virtuelle Kamera \
+                 (mit VSR, wenn aktiv), Ton bleibt lokal, dieses Fenster ist unangetastet. \
+                 Beenden über diesen Button oder Ctrl+C",
+            ),
+            "headless feed start now fensterlos windowless",
+            true,
+            "Start headless feed now",
+            false,
+            |shell, cx| {
+                if shell.backend.sessions().active().is_some() {
+                    super::push_toast(
+                        cx,
+                        ToastKind::Warn,
+                        "Headless-Feed",
+                        "Erst die laufende Session trennen — Konsole und Stream sind belegt",
+                    );
+                    return;
+                }
+                match resolve_headless_host(shell) {
+                    Ok(addr) => {
+                        let exe = std::env::current_exe().unwrap_or_default();
+                        let mut spawn = std::process::Command::new(exe);
+                        spawn.arg("--virtualcam").arg(&addr);
+                        #[cfg(windows)]
+                        {
+                            use std::os::windows::process::CommandExt as _;
+                            // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP — der
+                            // Feed überlebt das Schließen dieses Fensters.
+                            spawn.creation_flags(0x0000_0008 | 0x0000_0200);
+                        }
+                        match spawn.spawn() {
+                            Ok(_child) => super::push_toast(
+                                cx,
+                                ToastKind::Success,
+                                "Headless-Feed gestartet",
+                                "Fensterlose Session läuft — Kamera in OBS/Discord prüfen",
+                            ),
+                            Err(err) => {
+                                tracing::error!("Headless-Spawn fehlgeschlagen: {err}");
+                                super::push_toast(
+                                    cx,
+                                    ToastKind::Warn,
+                                    "Headless-Feed",
+                                    "Konnte nicht gestartet werden — Details im Log",
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("Headless-Start: {err}");
+                        super::push_toast(
+                            cx,
+                            ToastKind::Warn,
+                            "Headless-Feed",
+                            "Kein Host auflösbar — manuellen Host anlegen oder Konsole einschalten",
+                        );
+                    }
+                }
+            },
+        ));
+    }
 
     let ft_display_reason = "libplacebo-Display-Ziel nicht portiert — nur INI-Kompatibilität";
     let mut display = Section::new("Display");
@@ -743,6 +850,35 @@ pub(crate) fn sections(
     sections.push(advanced);
 
     sections
+}
+
+/// Host-Adresse für den Headless-Start auflösen (gleiche Reihenfolge wie
+/// `virtualcam_headless::resolve_host`, plus Discovery-Fallback): manueller
+/// Host mit zugeordnetem registrierten Host zuerst; andernfalls genau eine
+/// registrierte + eine gefundene Konsole (typischer 1-Konsole-Haushalt).
+fn resolve_headless_host(shell: &AppShell) -> Result<String, String> {
+    let settings = shell.backend.settings().lock().unwrap_or_else(|e| e.into_inner());
+    let registered = settings.registered_hosts();
+    let manual = settings.manual_hosts();
+    for r in &registered {
+        if let Some(m) = manual
+            .iter()
+            .find(|m| m.registered && m.registered_mac.mac() == r.server_mac.mac())
+        {
+            return Ok(m.host.clone());
+        }
+    }
+    let discovered = shell.backend.discovery().hosts();
+    if registered.len() == 1 && discovered.len() == 1 {
+        let addr = discovered[0].host_addr.clone();
+        tracing::info!(
+            "Headless-Start: manueller Host fehlt — Discovery-Fallback → {addr}"
+        );
+        return Ok(addr);
+    }
+    Err(
+        "Kein zugeordneter manueller Host und keine eindeutige Discovery-Adresse".to_string(),
+    )
 }
 
 /// Index-basierte Select-Optionen (Wert = Index-String, z. B. Display-Enums).

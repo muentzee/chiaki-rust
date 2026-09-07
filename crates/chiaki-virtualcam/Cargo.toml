@@ -16,6 +16,11 @@ thiserror.workspace = true
 # (Win11), v4l2 ist Linux-only.
 virtualcam = { version = "1.0.0", default-features = false, features = ["obs"] }
 winreg = "0.52"
+# ipc.rs: Instanz-Mutex/Stop-Event zwischen GUI und Headless-Runner
+# (Win32_Security: SECURITY_ATTRIBUTES in CreateMutexW/CreateEventW-Signatur)
+windows = { workspace = true, features = ["Win32_Security"] }
+# default_pid_path über app_paths (data-Ordner)
+chiaki-settings.workspace = true
 
 [dev-dependencies]
 # probe_filter-Example: direkte COM-Inspektion des registrierten OBS-Filters.

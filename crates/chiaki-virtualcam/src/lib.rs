@@ -31,8 +31,10 @@
 //! UI-frei (CONVENTIONS §7) und ohne eigene Filter-DLL/Registrierung.
 
 pub mod feed;
+pub mod ipc;
 pub mod registry;
 pub mod scaler;
 
 pub use feed::{CamFeed, CamFeedConfig, CamResolution};
+pub use ipc::{is_running, request_stop};
 pub use registry::{autostart_active, obs_virtualcam_available, set_autostart};

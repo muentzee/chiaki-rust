@@ -135,18 +135,53 @@ pub fn run(host: Option<String>, profile: Option<String>) -> Result<(), String> 
         info.video_profile
     };
 
+    // Nur EINE Headless-Instanz (Instanz-Mutex + PID-Datei — die GUI zeigt
+    // den Status und schickt das Stop-Event); Drop am Funktionsende räumt auf.
+    let instance = chiaki_virtualcam::ipc::InstanceGuard::acquire(
+        chiaki_virtualcam::ipc::default_pid_path(),
+    )
+    .map_err(|err| format!("Headless-Instanz: {err}"))?;
+
+    // GUI-fähiger Stop (Settings-Button): Named Event im Hauptloop.
+    let stop_event = chiaki_virtualcam::ipc::StopEvent::create()
+        .map_err(|err| format!("Stop-Event: {err}"))?;
+
     // Kamera VOR der Session öffnen (Fehler → sauber beenden statt still
     // ohne Feed zu laufen — im Headless-Modus ist die Kamera der Zweck).
-    let resolution = CamResolution::from_ini_value(&settings.virtualcam_resolution());
+    // Bei VSR läuft sie im VSR-Output-Format (wie die GUI — User-Vorgabe).
+    let nv_vsr = settings.nv_vsr_enabled();
+    let nv_vsr_scale = {
+        let raw = settings.nv_vsr_scale().clamp(0, i64::from(u32::MAX)) as u32;
+        if (100..=400).contains(&raw) { raw } else { 200 }
+    };
+    let nv_vsr_quality = match settings.nv_vsr_quality() {
+        1..=3 => Some(settings.nv_vsr_quality() as u32),
+        _ => None,
+    };
+    let (cam_w, cam_h, cam_resolution) = if nv_vsr {
+        let (w, h) = chiaki_media::vsr::output_dims(
+            video_profile.width,
+            video_profile.height,
+            nv_vsr_scale,
+        );
+        tracing::info!("Kamera im VSR-Output-Format {w}x{h} (virtualcam_resolution ohne Wirkung)");
+        (w, h, CamResolution::Stream)
+    } else {
+        (
+            video_profile.width,
+            video_profile.height,
+            CamResolution::from_ini_value(&settings.virtualcam_resolution()),
+        )
+    };
     let mut cam = CamFeed::open(CamFeedConfig {
-        width: video_profile.width,
-        height: video_profile.height,
+        width: cam_w,
+        height: cam_h,
         fps: video_profile.max_fps,
-        resolution,
+        resolution: cam_resolution,
     })
     .map_err(|err| format!("Virtuelle Kamera: {err}"))?;
     tracing::info!(
-        "Kamera aktiv: {}x{} @ {} (Quelle {}x{})",
+        "Kamera aktiv: {}x{} @ {} (Quelle {}x{}, VSR {nv_vsr})",
         cam.dims().0,
         cam.dims().1,
         video_profile.max_fps,
@@ -178,10 +213,22 @@ pub fn run(host: Option<String>, profile: Option<String>) -> Result<(), String> 
     *lock(shared.media_tx.lock()) = Some(media_tx);
 
     // Media-Thread (Decoder + AudioOutput + CamFeed — !Sync-Besitz).
+    // VSR erzwingt den CUDA-Decoder wie in der GUI (vsrupscaler-Vertrag).
     let media_settings = MediaSnapshot {
-        hw_backend: hw_backend_from_setting(&settings.hw_decoder()),
+        hw_backend: if nv_vsr {
+            chiaki_media::decoder::HwBackend::Cuda
+        } else {
+            hw_backend_from_setting(&settings.hw_decoder())
+        },
         codec: video_profile.codec,
         max_fps: video_profile.max_fps,
+        nv_vsr,
+        nv_vsr_scale,
+        nv_vsr_quality,
+        nv_vsr_sdk_path: {
+            let path = settings.nv_vsr_sdk_path();
+            (!path.trim().is_empty()).then_some(std::path::PathBuf::from(path))
+        },
         audio_out_device: {
             let dev = settings.audio_out_device();
             (!dev.trim().is_empty()).then_some(dev)
@@ -213,10 +260,18 @@ pub fn run(host: Option<String>, profile: Option<String>) -> Result<(), String> 
         video_profile.max_fps,
     );
 
-    // Hauptschleife: Quit-Event (Session-Ende) oder Ctrl+C abwarten.
+    // Hauptschleife: Quit-Event (Session-Ende), Ctrl+C oder das Stop-Event
+    // der GUI abwarten (Wait ersetzt den Sleep — Stop wirkt sofort).
     while !shared.quit_flag.load(Ordering::SeqCst) && !stop_flag.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(100));
+        if stop_event.wait(100) {
+            tracing::info!("Stop-Signal (GUI) empfangen — Headless-Feed wird beendet");
+            println!("Stop-Signal empfangen — Headless-Feed wird beendet.");
+            break;
+        }
     }
+    // `instance` (Instanz-Mutex + PID-Datei) wird am Funktionsende per RAII
+    // freigegeben — nach dem Session-Teardown, damit die GUI den Status
+    // „läuft" so lange korrekt zeigt, wie wirklich aufgeräumt wird.
 
     // Media-Kanal zuerst schließen → der Media-Thread räumt Audio/Kamera auf
     // und endet; dann Session stoppen (Reihenfolge wie sessions.rs-Teardown).
@@ -310,6 +365,10 @@ struct MediaSnapshot {
     audio_out_device: Option<String>,
     audio_volume: u32,
     audio_buffer_size: u32,
+    nv_vsr: bool,
+    nv_vsr_scale: u32,
+    nv_vsr_quality: Option<u32>,
+    nv_vsr_sdk_path: Option<std::path::PathBuf>,
 }
 
 /// Media-Loop des Headless-Modus: alle queued Frames dekodieren (CPU-Transfer
@@ -327,6 +386,17 @@ fn media_loop(
             None
         }
     };
+    // VSR (User-Vorgabe: die Kamera bekommt den VSR-Output). CPU-Transfer-
+    // Dekode: der Frame liegt als CPU-NV12 vor, `process_frame` liefert den
+    // skalierten Frame als kontiguierliches NV12 ([`FrameBuf`]) — derselbe
+    // Pfad wie der GUI-CPU-Fallback. Init mit dem ersten Frame.
+    let mut vsr = if settings.nv_vsr {
+        Some(chiaki_media::VsrUpscaler::new(settings.nv_vsr_sdk_path.clone()))
+    } else {
+        None
+    };
+    let mut vsr_inited = false;
+    let mut vsr_buf = chiaki_media::FrameBuf::new();
     let mut opus = OpusAudioDecoder::new();
     let mut audio_out: Option<AudioOutput> = None;
     let mut cam_frames_prev: u64 = 0;
@@ -371,7 +441,51 @@ fn media_loop(
                 Ok(Some(frame)) => {
                     // CPU-Transfer-Pfad: NV12 liegt im Systemspeicher; GPU-
                     // Frames (raw-Output) gibt es hier bewusst nicht.
-                    if let Some((y, uv)) = frame.nv12_cpu_planes() {
+                    let Some((y, uv)) = frame.nv12_cpu_planes() else {
+                        tracing::warn!("Headless: GPU-Frame im CPU-Pfad übersprungen");
+                        continue;
+                    };
+                    // VSR einmalig mit dem ersten Frame initialisieren (wie
+                    // GUI). Schlägt sie fehl, läuft der Feed mit den rohen
+                    // Stream-Frames weiter (Kamera-Format passt dann nicht —
+                    // der CamFeed zählt/loggt die abgewiesenen Frames).
+                    if let (Some(up), false) = (&mut vsr, vsr_inited) {
+                        let ctx = decoder
+                            .cuda_context()
+                            .unwrap_or(std::ptr::null_mut());
+                        let stream = decoder.cuda_stream().unwrap_or(std::ptr::null_mut());
+                        vsr_inited = up.init(
+                            &frame,
+                            ctx,
+                            stream,
+                            settings.nv_vsr_scale,
+                            settings.nv_vsr_quality,
+                        );
+                        tracing::info!(
+                            "VSR: {} ({:?})",
+                            if vsr_inited { "aktiv" } else { "NICHT aktiv" },
+                            up.last_error()
+                        );
+                    }
+                    // POST-VSR-Frame feeden (User-Vorgabe: Kamera MIT VSR).
+                    let fed = if let (Some(up), true) = (&mut vsr, vsr_inited) {
+                        if up.process_frame(&frame, &mut vsr_buf) {
+                            cam.push_nv12(
+                                vsr_buf.width(),
+                                vsr_buf.height(),
+                                vsr_buf.y(),
+                                vsr_buf.pitch(),
+                                vsr_buf.uv(),
+                                vsr_buf.pitch(),
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !fed {
                         cam.push_nv12(
                             frame.width,
                             frame.height,
@@ -380,11 +494,9 @@ fn media_loop(
                             uv,
                             frame.planes[1].stride,
                         );
-                        shared.cam_frames.store(cam.frames_sent(), Ordering::Relaxed);
-                        shared.cam_errors.store(cam.errors(), Ordering::Relaxed);
-                    } else {
-                        tracing::warn!("Headless: GPU-Frame im CPU-Pfad übersprungen");
                     }
+                    shared.cam_frames.store(cam.frames_sent(), Ordering::Relaxed);
+                    shared.cam_errors.store(cam.errors(), Ordering::Relaxed);
                 }
                 Ok(None) => {}
                 Err(err) => tracing::warn!("Decode-Fehler: {err:?}"),
