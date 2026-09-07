@@ -145,3 +145,78 @@ fn vsr_full_init_and_single_frame_upscale_on_gpu() {
     assert!(up.last_error().is_none(), "kein Fehler erwartet");
     assert!(up.is_active(), "VSR muss nach den Frames aktiv bleiben");
 }
+
+/// Virtual-Cam-Feed (HANDOFF §8, User-Vorgabe): der Kamera-Download muss
+/// den VSR-OUTPUT liefern (Output-Dimensionen, kontiguierliches NV12-Layout,
+/// plausibler Inhalt). Beweist die neue Kamera-Pipeline RGBA→NV12(GPU) +
+/// Download ohne Konsole.
+#[test]
+#[ignore = "CUDA-GPU + VFX SDK nötig (NVDEC-Kontext, TensorRT-Engine-Load)"]
+fn vsr_camera_download_delivers_output_nv12() {
+    if std::env::var_os("CHIAKI_FFMPEG_DIR").is_none() {
+        std::env::set_var(
+            "CHIAKI_FFMPEG_DIR",
+            r"F:\projekte\chiaki-rust-remaster\ffmpeg-n7.1-latest-win64-gpl-shared-7.1\bin",
+        );
+    }
+    if std::env::var_os("CHIAKI_VSR_SDK_DIR").is_none() {
+        std::env::set_var(
+            "CHIAKI_VSR_SDK_DIR",
+            r"F:\projekte\chiaki-rust-remaster\vfx_sdk\sdk\VideoFX\bin",
+        );
+    }
+
+    let decoder = Decoder::new(chiaki_core::error::Codec::H264, HwBackend::Cuda, 60)
+        .expect("CUDA-Decoder muss auf dieser Maschine laufen");
+    let cuda_ctx = decoder.cuda_context().expect("NVDEC-CUDA-Kontext");
+    let cuda_stream = decoder.cuda_stream().unwrap_or(ptr::null_mut());
+
+    let mut up = VsrUpscaler::new(None);
+    let (_buf, frame) = synthetic_nv12_frame(128, 128);
+    assert!(
+        up.init(&frame, cuda_ctx, cuda_stream, 200, None),
+        "VSR init: last_error={:?}",
+        up.last_error()
+    );
+
+    // VSR-Run (CPU-Input-Variante — dstRgba entsteht im Netzlauf genauso
+    // wie im GPU-Interop-Modus; der GPU-Input selbst ist in
+    // vsr_interop_zoom abgedeckt). Danach holt der Kamera-Download den
+    // VSR-Output als CPU-NV12 — exakt der neue Kamera-Pfad.
+    let mut out = FrameBuf::new();
+    assert!(
+        up.process_frame(&frame, &mut out),
+        "process_frame: last_error={:?}",
+        up.last_error()
+    );
+
+    let mut cam_buf = Vec::new();
+    let (w, h, pitch) = up
+        .download_output_nv12_cpu(&mut cam_buf)
+        .expect("Kamera-Download muss den VSR-Output liefern");
+    assert_eq!((w, h), (256, 256), "VSR-Output-Dimensionen");
+    assert_eq!(pitch, chiaki_media::vsr::nv12_output_pitch(256));
+    let (y_len, uv_len) = (pitch * h as usize, pitch * h as usize / 2);
+    assert!(cam_buf.len() >= y_len + uv_len, "Buffer muss beide Planen tragen");
+
+    // Kontiguierliches Layout (wie FrameBuf): UV exakt bei pitch*h — der
+    // CamFeed liest mit exactly diesem Vertrag.
+    let y = &cam_buf[..y_len];
+    let uv = &cam_buf[y_len..y_len + uv_len];
+    let y_mean = y.iter().map(|&b| b as u64).sum::<u64>() as f64 / y.len() as f64;
+    let uv_mean = uv.iter().map(|&b| b as u64).sum::<u64>() as f64 / uv.len() as f64;
+    println!("Kamera-Download: {w}x{h}, pitch {pitch}, Y mean {y_mean:.1}, UV mean {uv_mean:.1}");
+    // Eingabe uniform grau: der VSR-Output (und damit der Download) muss
+    // näherungsweise grau/neutral bleiben — zugleich Beweis, dass echte
+    // Bytes beider Planen angekommen sind (kein Schwarz/Gradient-Fehler).
+    assert!((y_mean - 128.0).abs() < 24.0, "Y nahezu grau ({y_mean})");
+    assert!((uv_mean - 128.0).abs() < 12.0, "UV nahezu neutral ({uv_mean})");
+
+    // Zweiter Download im selben Buffer (Wiederverwendungs-Vertrag).
+    let mut out2 = FrameBuf::new();
+    assert!(up.process_frame(&frame, &mut out2));
+    let (w2, h2, _) = up
+        .download_output_nv12_cpu(&mut cam_buf)
+        .expect("zweiter Download (Buffer-Wiederverwendung)");
+    assert_eq!((w2, h2), (256, 256));
+}

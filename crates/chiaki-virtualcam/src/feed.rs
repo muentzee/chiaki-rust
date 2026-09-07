@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! CamFeed: Besitzer der virtuellen Kamera (OBS-Backend) und NV12-Writer.
 //!
-//! Ein [`CamFeed`] wird pro Session geöffnet (Kamera-Standardauflösung aus
-//! [`CamResolution`] + Stream-FPS) und lebt im Media-Thread: `push_nv12_*`
-//! entstrippt die Quell-Strides, skaliert bei Bedarf auf die Zielauflösung
-//! und publiziert den Frame in die OBS-Shmem-Queue (Triple-Buffering —
-//! die Queue kollabiert keine Frames, ein langsamer Konsument verliert
-//! einfach alte Slots). Beim Drop schließt die Kamera (Queue-State
-//! STOPPING + Mapping freigeben) — Konsumenten zeigen danach kein Bild.
+//! Ein [`CamFeed`] wird pro Session geöffnet — bei aktivem VSR im
+//! VSR-Output-Format (Upscale-Schärfe für die Viewer, User-Vorgabe),
+//! sonst in der Stream-Auflösung bzw. dem [`CamResolution`]-Preset — und
+//! lebt im Media-Thread: `push_nv12_*` entstrippt die Quell-Strides,
+//! skaliert bei Bedarf auf die Zielauflösung und publiziert den Frame in
+//! die OBS-Shmem-Queue (Triple-Buffering — die Queue kollabiert keine
+//! Frames, ein langsamer Konsument verliert einfach alte Slots). Beim Drop
+//! schließt die Kamera (Queue-State STOPPING + Mapping freigeben) —
+//! Konsumenten zeigen danach kein Bild.
 
 use crate::scaler;
 use virtualcam::{BackendKind, Camera, PixelFormat};
@@ -151,6 +153,38 @@ impl CamFeed {
         }
     }
 
+    /// Publiziert einen bereits gepackten NV12-Frame (`w*h*3/2`, Zeilen-
+    /// abstand = width) — Schnellpfad für kontiguierliche Quellen (VSR-
+    /// Output-Download mit 64er-Pitch; 3840 ist 64-aligned, dort ist der
+    /// Pitch exakt die Breite und die Zwischenkopie entfällt).
+    pub fn push_nv12_packed(&mut self, w: u32, h: u32, packed: &[u8]) {
+        let expected = w as usize * h as usize * 3 / 2;
+        if packed.len() != expected {
+            self.reject(format!(
+                "gepackter Frame hat {} Bytes, erwartet {} für {w}x{h}",
+                packed.len(),
+                expected
+            ));
+            return;
+        }
+        if (w, h) != (self.width, self.height) {
+            self.reject(format!(
+                "gepackter Frame {w}x{h} passt nicht zum Kamera-Format {}x{}",
+                self.width, self.height
+            ));
+            return;
+        }
+        self.send(packed);
+    }
+
+    /// Zähler + Einmal-Log für verworfene Frames.
+    fn reject(&mut self, reason: String) {
+        self.errors += 1;
+        if self.errors == 1 {
+            tracing::warn!("Kamera-Feed verwirft Frame: {reason}");
+        }
+    }
+
     fn push_nv12_checked(
         &mut self,
         w: u32,
@@ -160,6 +194,14 @@ impl CamFeed {
         uv: &[u8],
         uv_stride: usize,
     ) -> Result<(), String> {
+        if (w, h) != (self.width, self.height) && w < self.width {
+            // Quelle kleiner als die Kamera — Upscale kann der Feed nicht
+            // (z. B. VSR zur Laufzeit ausgefallen, Kamera läuft im VSR-Format).
+            return Err(format!(
+                "Quelle {w}x{h} kleiner als Kamera {}x{} — Upscale nicht möglich",
+                self.width, self.height
+            ));
+        }
         // Zielauflösung kleiner als der Frame → erst packen, dann
         // herunterskalieren (Upscale kann der Feed nicht).
         let scaled = self.width < w || self.height < h;
@@ -173,11 +215,30 @@ impl CamFeed {
         // Feld-Split-Borrows: der Frame ist der fertige Puffer, die Kamera
         // wird mutabel gebraucht.
         let frame: &[u8] = if scaled { &self.scaled } else { &self.packed };
-        self.camera
-            .send_native(frame)
-            .map_err(|err| format!("Kamera-Send fehlgeschlagen: {err}"))?;
-        self.frames_sent += 1;
+        let CamFeed { camera, frames_sent, errors, .. } = self;
+        match camera.send_native(frame) {
+            Ok(()) => *frames_sent += 1,
+            Err(err) => {
+                *errors += 1;
+                if *errors == 1 {
+                    tracing::warn!("Kamera-Feed: Senden fehlgeschlagen: {err}");
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Sendet einen passenden Frame und zählt ihn.
+    fn send(&mut self, frame: &[u8]) {
+        match self.camera.send_native(frame) {
+            Ok(()) => self.frames_sent += 1,
+            Err(err) => {
+                self.errors += 1;
+                if self.errors == 1 {
+                    tracing::warn!("Kamera-Feed: Senden fehlgeschlagen: {err}");
+                }
+            }
+        }
     }
 
     pub fn frames_sent(&self) -> u64 {

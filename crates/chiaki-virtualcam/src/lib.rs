@@ -14,14 +14,15 @@
 //!   (zwei Writer = Konflikt). OBS kann die Kamera gleichzeitig als
 //!   Video-Capture-Quelle einbinden (Twitch-Szenario) — es ist dann nur
 //!   Konsument.
-//! * **Frames** — der Decoder liefert NV12; das OBS-Backend konsumiert
-//!   NV12. Kein I420-Umbau nötig, nur das Entstrippen der NVDEC-/VSR-
-//!   Strides in einen gepackten Buffer ([`scaler::pack_nv12_strided`],
-//!   optional Downscale auf Kamera-Standardauflösung via [`scaler`]).
+//! * **Frames** — das OBS-Backend konsumiert NV12; die Quelle liefert sie
+//!   passend: bei aktivem VSR der **VSR-Output** (RGBA→NV12 auf der GPU +
+//!   Download — die Upscale-Schärfe geht an die Viewer, User-Vorgabe),
+//!   sonst der dekodierte Stream-Frame. Nur das Entstrippen der NVDEC-
+//!   Strides in einen gepackten Buffer ([`scaler::pack_nv12_strided`]),
+//!   optional Downscale auf 720p/1080p via [`scaler`] (ohne VSR).
 //! * **Tap** — der Media-Thread der Session (chiaki-ui `sessions.rs`) bzw.
-//!   der Headless-Runner (chiaki-app) schieben jeden dekodierten Frame
-//!   **vor** VSR in den [`feed::CamFeed`] (Default: Stream-Auflösung —
-//!   Kamera-Standard; VSR-Output als Quelle ist bewusst nicht v1).
+//!   der Headless-Runner (chiaki-app) schieben den jeweils schärfsten
+//!   verfügbaren Frame in den [`feed::CamFeed`].
 //! * **Lebenszyklus** — Kamera existiert nur während einer Session
 //!   (Mapping wird beim Session-Ende freigegeben; Konsumenten zeigen dann
 //!   kein Bild). Erste Nutzung: Discord ggf. neu starten, damit die Kamera

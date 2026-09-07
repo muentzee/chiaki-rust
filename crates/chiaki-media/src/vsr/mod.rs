@@ -935,6 +935,89 @@ impl VsrUpscaler {
         self.dst_rgba.as_deref().map(|img| img as *const NvCVImage)
     }
 
+    /// Virtual-Cam-Feed (HANDOFF §8): holt den **VSR-Output** des letzten
+    /// erfolgreichen [`Self::process_frame_gpu`] als kontiguierliches
+    /// CPU-NV12 (`Y@0 .. pitch*h`, `UV@pitch*h ..` — FrameBuf-Layout) in
+    /// `buf` (wiederverwendet, wird bei Bedarf vergrößert). Führt die
+    /// RGBA→NV12-Konvertierung auf der GPU und den Download aus — dieselben
+    /// Stufen wie im CPU-Pfad (Schritt 4 + 5 in [`Self::process_planes`]).
+    ///
+    /// Liefert `(Breite, Höhe, Pitch)`; muss auf DEMSELBEN Thread wie
+    /// `process_frame_gpu` aufgerufen werden (SDK-Bilder sind nicht Sync)
+    /// und davor-Produzierte GPU-Daten sind bis zum nächsten
+    /// `process_frame_gpu` stabil (VSR-Run wird hier synchronisiert).
+    pub fn download_output_nv12_cpu(&mut self, buf: &mut Vec<u8>) -> Result<(u32, u32, usize), String> {
+        if !self.active {
+            return Err("VSR ist inaktiv".into());
+        }
+        let api = self.api.expect("active implies api");
+        let dst_rgba: *mut NvCVImage = self.dst_rgba.as_deref_mut().expect("alloced");
+        let dst_nv12: *mut NvCVImage = self.dst_nv12.as_deref_mut().expect("alloced");
+        let (out_w, out_h) = (self.out_w, self.out_h);
+        let pitch = nv12_output_pitch(out_w);
+        let total = pitch * out_h as usize * 3 / 2 + 64; // +64 Slack wie CPU-Pfad
+        if buf.len() < total {
+            buf.resize(total, 0);
+        }
+
+        unsafe { (api.cu_ctx_push_current)(self.cuda_ctx) };
+        // 4) RGBA → NV12 (GPU, identisch zum convert-out des CPU-Pfads).
+        let st_convert = unsafe {
+            (api.image_transfer)(
+                dst_rgba as *const NvCVImage,
+                dst_nv12,
+                1.0,
+                self.cuda_stream,
+                &mut *self.transfer_tmp,
+            )
+        };
+        if st_convert != NVCV_SUCCESS {
+            unsafe { self.pop_ctx() };
+            return Err(format!(
+                "VSR-Kamera: convert-out (RGBA->NV12) fehlgeschlagen (status {} ({}))",
+                st_convert,
+                sys::status_name(st_convert)
+            ));
+        }
+        // VSR-Run + Konvertierung abschließen, bevor die CPU-Kopie liest.
+        unsafe {
+            (api.cu_ctx_synchronize)();
+        }
+        // 5) GPU-NV12 → kontiguierlicher CPU-Buffer (identisch zu Schritt 5).
+        let mut cpu_view = NvCVImage::zeroed();
+        let st_download = unsafe {
+            (api.image_init)(
+                &mut cpu_view,
+                out_w,
+                out_h,
+                pitch as c_int,
+                buf.as_mut_ptr().cast(),
+                NVCV_YUV420,
+                NVCV_U8,
+                NVCV_NV12,
+                NVCV_CPU,
+            );
+            let rc = (api.image_transfer)(
+                dst_nv12 as *const NvCVImage,
+                &mut cpu_view,
+                1.0,
+                self.cuda_stream,
+                &mut *self.transfer_tmp,
+            );
+            (api.cu_stream_synchronize)(self.cuda_stream);
+            rc
+        };
+        unsafe { self.pop_ctx() };
+        if st_download != NVCV_SUCCESS {
+            return Err(format!(
+                "VSR-Kamera: Download (NV12 GPU->CPU) fehlgeschlagen (status {} ({}))",
+                st_download,
+                sys::status_name(st_download)
+            ));
+        }
+        Ok((out_w, out_h, pitch))
+    }
+
     /// Diagnose: eigene Dimensionen des GPU-RGBA-Images (width/height/pitch).
     pub fn gpu_rgba_dims(&self) -> Option<(u32, u32, i32)> {
         self.active.then(|| {

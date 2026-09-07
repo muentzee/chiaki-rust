@@ -530,8 +530,10 @@ pub(crate) fn sections(
         "video-virtualcam-resolution",
         "Camera resolution",
         Some(
-            "Camera output size — stream resolution (pre-VSR) or downscale to 720p/1080p; \
-             effective on the next session start",
+            "Camera output size — with VSR active the camera runs at the VSR \
+             output (upscaled sharpness for viewers); without VSR: stream \
+             resolution or downscale to 720p/1080p. Effective on the next \
+             session start",
         ),
         "virtual camera resolution 720 1080 downscale",
         true,
