@@ -551,6 +551,7 @@ fn set_bool(s: &mut chiaki_settings::settings::Settings, id: &str, value: bool) 
         "video-hide-cursor" => s.set_hide_cursor(value),
         "video-use-zero-copy" => s.set_use_zero_copy(value),
         "video-vsync" => s.set_vsync_enabled(value),
+        "video-frame-pacing" => s.set_frame_pacing(value),
         "video-vulkan-deferred-swap" => s.set_vulkan_deferred_swap(value),
         "video-nv-vsr" => s.set_nv_vsr_enabled(value),
         "video-show-vsr-badge" => s.set_show_vsr_badge(value),

@@ -190,6 +190,11 @@ pub(crate) enum MediaCmd {
     Connected,
     /// Mic-Mute-Umschaltung (Einblend-Panel).
     MicUnmuted(bool),
+    /// Wake-only: Ein Video-Frame landete im VideoSlot. Ohne dieses Signal
+    /// läuft der Media-Loop bis zu 10 ms weiter (Audio-Takt/recv-Timeout),
+    /// bevor der Frame dekodiert wird — das überlagert der Anzeige Eigen-
+    /// Jitter, der nicht vom Netzwerk stammt.
+    Video,
 }
 
 /// Bounded FIFO für empfangene (kodierte) Frames. H.265/H.264 referenziert
@@ -269,6 +274,9 @@ pub(crate) struct MediaSettings {
     /// settings/vsync — GPU-Sink presentet mit SyncInterval 1 (Display-Takt)
     /// statt 0. Wirksam beim Session-Start (Sink-Erzeugung).
     pub vsync: bool,
+    /// settings/frame_pacing — Sink präsentiert am 1/FPS-Takt statt bei
+    /// Frame-Ankunft (Burst-Paare werden verteilt; +bis 1 Periode Latenz).
+    pub frame_pacing: bool,
     /// GPU-Pfad (settings/video_output) — `None` = klassischer Presenter-Pfad.
     pub gpu: Option<GpuPath>,
 }
@@ -335,6 +343,7 @@ impl MediaSettings {
             rumble_haptics_intensity: settings.rumble_haptics_intensity(),
             haptic_override: settings.haptic_override() as f32,
             vsync: settings.vsync_enabled(),
+            frame_pacing: settings.frame_pacing(),
             gpu: None, // wird in connect() entschieden (needs Profil-Auflösung)
         }
     }
@@ -895,7 +904,12 @@ impl SessionManager {
                 } else {
                     (w, h)
                 };
-                match chiaki_render::gpu_sink::GpuSink::new(GPUI_WINDOW_TITLE, video_size, media.vsync) {
+                let sink_config = chiaki_render::gpu_sink::GpuSinkConfig {
+                    vsync: media.vsync,
+                    paced: media.frame_pacing,
+                    frame_period_us: 1_000_000 / media.max_fps.max(1),
+                };
+                match chiaki_render::gpu_sink::GpuSink::new(GPUI_WINDOW_TITLE, video_size, sink_config) {
                     Ok(sink) => {
                         let kind = if media.nv_vsr {
                             GpuPathKind::CudaVsrInterop
@@ -1486,6 +1500,9 @@ impl SessionCallbacks for BridgeCallbacks {
             frames_lost: frame.frames_lost,
             frame_recovered: frame.frame_recovered,
         });
+        // Media-Thread sofort wecken (sonst wartet er bis zum nächsten
+        // Audio-Paket/Timeout — 0–10 ms Eigen-Jitter im Anzeige-Raster).
+        let _ = self.send_media(MediaCmd::Video);
         true
     }
 
@@ -1782,6 +1799,9 @@ struct MediaTimings {
                         input.set_muted(true);
                     }
                 }
+                // Wake-only (VideoSlot hat Zuwachs) — die Video-Verarbeitung
+                // läuft unten bei jedem Durchlauf.
+                Ok(MediaCmd::Video) => {}
                 Ok(MediaCmd::Haptics(data)) => {
                     if let Some(player) = &haptics {
                         // C++: haptic_override skaliert die Amplituden des
@@ -2157,15 +2177,17 @@ struct MediaTimings {
                     let sink_line = gpu_handle.as_ref().map(|g| {
                         let s = g.stats_values();
                         format!(
-                            " | Sink: presented {}, uploads {}, d3d11-copies {}, rgba {}, drops {}, burst-collapsed {}, too-fast {}, dt-ema {} µs",
+                            " | Sink: presented {}, uploads {}, d3d11-copies {}, rgba {}, drops {}, too-fast {}, dt-ema {} µs, dt {}..{} µs, jitter-ema {} µs",
                             s.frames_presented,
                             s.cpu_uploads,
                             s.d3d11_copies,
                             s.rgba_presents,
                             s.frames_dropped,
-                            s.burst_collapsed,
                             s.present_too_fast,
                             s.present_dt_ema_us,
+                            s.present_dt_min_us,
+                            s.present_dt_max_us,
+                            s.present_jitter_ema_us,
                         )
                     });
                     // Audio-Bilanz (HANDOFF P1): pushed vs. pulled je Fenster.

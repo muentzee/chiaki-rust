@@ -30,6 +30,8 @@ use crate::backend::sessions::StreamTelemetry;
 /// Testpattern-Thread, groß genug für sichtbare Details).
 pub const WIDTH: u32 = 1280;
 pub const HEIGHT: u32 = 720;
+/// Fake-Quellrate (der Producer-Thread taktet hierauf).
+pub const FPS: u32 = 60;
 /// Ziel-Bitrate des Fake-Streams (Bytes/s) — ~15 Mbit/s wie ein lokales
 /// 1080p-Profil, damit das HUD „echte" Werte zeigt.
 const BYTES_PER_SEC: u64 = 15_000_000 / 8;
@@ -68,7 +70,7 @@ fn run(
     // Connecting-Phase: Wakeup → Anmelden → Kalibrieren (Taktung wie im
     // UI-State: 0.8 s / 1.6 s / Connected).
     let connect_at = started + Duration::from_millis(2600);
-    let frame_period = Duration::from_millis(1000 / 60);
+    let frame_period = Duration::from_millis(1000 / u64::from(FPS));
 
     loop {
         if stop.load(Ordering::Relaxed) {

@@ -931,6 +931,10 @@ impl Settings {
     acc_bool!(log_verbose, set_log_verbose, "settings/log_verbose", false);
     acc_bool!(log_sanitize, set_log_sanitize, "settings/log_sanitize", true);
     acc_bool!(vsync_enabled, set_vsync_enabled, "settings/vsync", false);
+    // Frame-Pacing: Frames am 1/FPS-Takt präsentieren statt bei Ankunft
+    // (Rust-Erweiterung, kein C++-Pendant — C++ machte das im libplacebo-
+    // Frame-Mixer). Default aus = minimale Latenz.
+    acc_bool!(frame_pacing, set_frame_pacing, "settings/frame_pacing", false);
     acc_bool!(hide_cursor, set_hide_cursor, "settings/hide_cursor", true);
     acc_bool!(show_stream_stats, set_show_stream_stats, "settings/show_stream_stats", false);
     acc_bool!(show_vsr_badge, set_show_vsr_badge, "settings/show_vsr_badge", true);

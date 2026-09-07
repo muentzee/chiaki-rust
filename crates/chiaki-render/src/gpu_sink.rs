@@ -41,7 +41,7 @@ pub mod sys;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::core::Interface as _;
 use windows::Win32::Foundation::HWND;
@@ -92,14 +92,19 @@ pub struct SinkStats {
     pub rgba_presents: AtomicU64,
     pub resizes: AtomicU64,
     pub last_draw_us: AtomicU64,
-    /// Durch Burst-Collapse entfernte Frame-Nachrichten (zwei Frames kamen
-    /// zusammen an; der neuere hätte den älteren sofort verdrängt).
+    /// Legacy-Zähler aus der Burst-Collapse-Ära (immer 0 — der Media-Thread
+    /// meldet jeden Frame einzeln; bleibt für Log/Debug-Zeilen-Kompatibilität).
     pub burst_collapsed: AtomicU64,
-    /// Presents, die < 4 ms nach dem vorherigen erfolgten (Kadenz-Verletzung
-    /// gegenüber 60 fps — Ursache für sichtbares Mikro-Ruckeln).
+    /// Presents, die < 4 ms nach dem vorherigen erfolgten (Burst-Paare).
     pub present_too_fast: AtomicU64,
     /// EMA des Present-Abstands in µs (Render-Thread schreibt).
     pub present_dt_ema_us: AtomicU32,
+    /// Running-Minimum/-Maximum des Present-Abstands seit Session-Start —
+    /// die Spreizung ist die harte Zahl für „unsaubere Frame-Delivery“.
+    pub present_dt_min_us: AtomicU32,
+    pub present_dt_max_us: AtomicU32,
+    /// EMA von |dt − dt_ema| in µs (Jitter-Magnitude um den Mittelwert).
+    pub present_jitter_ema_us: AtomicU32,
 }
 
 /// Werte-Snapshot der Sink-Statistik.
@@ -115,6 +120,29 @@ pub struct SinkStatsValues {
     pub burst_collapsed: u64,
     pub present_too_fast: u64,
     pub present_dt_ema_us: u32,
+    pub present_dt_min_us: u32,
+    pub present_dt_max_us: u32,
+    pub present_jitter_ema_us: u32,
+}
+
+/// Anzeige-Konfiguration des Sinks (beim Session-Start eingefroren).
+#[derive(Debug, Clone, Copy)]
+pub struct GpuSinkConfig {
+    /// settings/vsync: Present mit SyncInterval 1 (Display-Vblank-Raster).
+    pub vsync: bool,
+    /// settings/frame_pacing: Frames an einem gleichmäßigen Takt (1/FPS)
+    /// präsentieren statt beim Ankommen — Burst-Paare werden auf Folge-Ticks
+    /// verteilt (Frame-Mixer-Verhalten des C++-libplacebo-Pfads). Kostet im
+    /// Mittel eine halbe, maximal eine volle Frame-Periode Zusatzlatenz.
+    pub paced: bool,
+    /// Periodendauer des Anzeige-Takts in µs (1_000_000 / Stream-FPS).
+    pub frame_period_us: u32,
+}
+
+impl Default for GpuSinkConfig {
+    fn default() -> Self {
+        GpuSinkConfig { vsync: false, paced: false, frame_period_us: 16_667 }
+    }
 }
 
 /// Geteilter Zustand zwischen Owner/Media-Thread und Render-Thread.
@@ -134,6 +162,11 @@ struct SinkShared {
     interop_lock: Mutex<()>,
     /// settings/vsync: Present mit SyncInterval 1 (Display-Takt) statt 0.
     vsync: AtomicBool,
+    /// settings/frame_pacing: Frames am 1/FPS-Takt präsentieren (siehe
+    /// [`GpuSinkConfig`]).
+    paced: AtomicBool,
+    /// Anzeige-Takt-Periode in µs (1_000_000 / Stream-FPS).
+    frame_period_us: AtomicU32,
     stats: SinkStats,
     lost: AtomicBool,
     stopping: AtomicBool,
@@ -289,6 +322,9 @@ impl GpuSinkHandle {
             burst_collapsed: s.burst_collapsed.load(Ordering::Relaxed),
             present_too_fast: s.present_too_fast.load(Ordering::Relaxed),
             present_dt_ema_us: s.present_dt_ema_us.load(Ordering::Relaxed),
+            present_dt_min_us: s.present_dt_min_us.load(Ordering::Relaxed),
+            present_dt_max_us: s.present_dt_max_us.load(Ordering::Relaxed),
+            present_jitter_ema_us: s.present_jitter_ema_us.load(Ordering::Relaxed),
         }
     }
 
@@ -334,9 +370,7 @@ impl GpuSink {
     /// `overlay_title` = exakter Titel des gpui-Fensters, dem gefolgt wird
     /// (Position/Größe/Z-Ordnung). `video_size` = Auflösung der Video-Quelle
     /// (NV12/BGRA-Input-Texturen; wird beim Auflösungswechsel neu gebaut).
-    /// `vsync` = settings/vsync: Present am Display-Takt (SyncInterval 1)
-    /// statt ohne Sync.
-    pub fn new(overlay_title: &str, video_size: (u32, u32), vsync: bool) -> SysResult<GpuSink> {
+    pub fn new(overlay_title: &str, video_size: (u32, u32), config: GpuSinkConfig) -> SysResult<GpuSink> {
         let (width, height) = (video_size.0.max(2), video_size.1.max(2));
         let shared = Arc::new(SinkShared {
             hwnd: Mutex::new(0),
@@ -345,7 +379,9 @@ impl GpuSink {
             zoom_factor: Mutex::new(0.0),
             slot: Mutex::new(None),
             interop_lock: Mutex::new(()),
-            vsync: AtomicBool::new(vsync),
+            vsync: AtomicBool::new(config.vsync),
+            paced: AtomicBool::new(config.paced),
+            frame_period_us: AtomicU32::new(config.frame_period_us.max(1_000)),
             stats: SinkStats::default(),
             lost: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
@@ -402,6 +438,9 @@ impl GpuSink {
             burst_collapsed: s.burst_collapsed.load(Ordering::Relaxed),
             present_too_fast: s.present_too_fast.load(Ordering::Relaxed),
             present_dt_ema_us: s.present_dt_ema_us.load(Ordering::Relaxed),
+            present_dt_min_us: s.present_dt_min_us.load(Ordering::Relaxed),
+            present_dt_max_us: s.present_dt_max_us.load(Ordering::Relaxed),
+            present_jitter_ema_us: s.present_jitter_ema_us.load(Ordering::Relaxed),
         }
     }
 
@@ -517,6 +556,9 @@ fn render_thread(
     // Present-Kadenz-Buchhaltung (Render-Thread-lokal).
     let mut last_present: Option<Instant> = None;
     let mut present_dt_ema_us: u64 = 0;
+    let mut present_jitter_ema_us: u64 = 0;
+    let mut present_dt_min_us: u64 = 0;
+    let mut present_dt_max_us: u64 = 0;
     'loop_: loop {
         // Blockierend auf Nachrichten; WM_APP_FRAME/WM_TIMER/WM_APP_STOP.
         if !sys::get_message(&mut msg) {
@@ -607,6 +649,33 @@ fn render_thread(
         }
 
         if dirty {
+            // Frame-Pacing (settings/frame_pacing): Liegt der letzte Present
+            // KÜRZER als eine Frame-Periode zurück (Burst-Paar), warten wir
+            // bis zum nächsten Takt, bevor gezeichnet wird — die Anzeige-
+            // Kadenz folgt dem 1/FPS-Raster statt der Burst-Ankunft
+            // (Frame-Mixer-Verhalten des C++-libplacebo-Pfads). Bei Hunger
+            // (Abstand ≥ Periode) wird sofort präsentiert. Bewusst VOR dem
+            // interop_lock: während des Wartens darf der Media-Thread den
+            // nächsten Frame schreiben.
+            if shared.paced.load(Ordering::Relaxed) {
+                let period_us = shared.frame_period_us.load(Ordering::Relaxed).max(1_000) as u64;
+                let now = Instant::now();
+                let since_present = last_present
+                    .map(|t| now.duration_since(t).as_micros() as u64)
+                    .unwrap_or(period_us);
+                if since_present < period_us {
+                    let wait_us = period_us - since_present;
+                    // Grob schlafen, den letzten Millimeter activ spin
+                    // (Windows-Timer-Auflösung ist nicht immer fein genug).
+                    if wait_us > 1_500 {
+                        std::thread::sleep(Duration::from_micros(wait_us - 1_000));
+                    }
+                    let target = Instant::now() + Duration::from_micros(wait_us.min(1_000));
+                    while Instant::now() < target {
+                        std::hint::spin_loop();
+                    }
+                }
+            }
             let started = Instant::now();
             let zoom = *shared.zoom.lock().unwrap();
             let zoom_factor = *shared.zoom_factor.lock().unwrap();
@@ -643,10 +712,31 @@ fn render_thread(
                         } else {
                             present_dt_ema_us * 9 / 10 + dt_us / 10
                         };
+                        let jitter = dt_us.abs_diff(present_dt_ema_us);
+                        present_jitter_ema_us =
+                            if present_jitter_ema_us == 0 { jitter } else { present_jitter_ema_us * 9 / 10 + jitter / 10 };
+                        present_dt_min_us = if present_dt_min_us == 0 {
+                            dt_us.min(u32::MAX as u64)
+                        } else {
+                            present_dt_min_us.min(dt_us)
+                        };
+                        present_dt_max_us = present_dt_max_us.max(dt_us);
                         shared
                             .stats
                             .present_dt_ema_us
                             .store(present_dt_ema_us.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+                        shared
+                            .stats
+                            .present_jitter_ema_us
+                            .store(present_jitter_ema_us.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+                        shared
+                            .stats
+                            .present_dt_min_us
+                            .store(present_dt_min_us.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+                        shared
+                            .stats
+                            .present_dt_max_us
+                            .store(present_dt_max_us.min(u32::MAX as u64) as u32, Ordering::Relaxed);
                         if dt_us < 4000 {
                             shared.stats.present_too_fast.fetch_add(1, Ordering::Relaxed);
                         }

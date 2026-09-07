@@ -38,7 +38,7 @@ use chiaki_core::controller::ControllerState;
 use chiaki_core::discovery::DiscoveryHostState;
 use chiaki_input::gamepad::apply_deadzone;
 use chiaki_input::{combine_states, Key as InKey, KeyboardMapper};
-use chiaki_render::gpu_sink::{GpuSink, GpuSinkHandle, SinkZoom};
+use chiaki_render::gpu_sink::{GpuSink, GpuSinkConfig, GpuSinkHandle, SinkZoom};
 use crate::backend::sessions::GPUI_WINDOW_TITLE;
 use chiaki_render::presenter::VideoPresenter;
 use chiaki_settings::hosts::HostMac;
@@ -520,15 +520,21 @@ impl StreamUiState {
             .unwrap_or(false);
         let pin_flag = Arc::new(AtomicBool::new(false));
         // GPU-Sink für den Fake-Modus (settings/video_output != cpu) — der
-        // komplette GPU-Anzeigepfad ist so ohne Konsole testbar.
+        // komplette GPU-Anzeigepfad ist so ohne Konsole testbar (inkl.
+        // vsync/frame_pacing-Schalter).
         let mut gpu_handle: Option<GpuSinkHandle> = None;
         {
-            let (want, vsync) = {
+            let (want, vsync, paced) = {
                 let settings = self.backend.settings().lock().unwrap_or_else(|e| e.into_inner());
-                (settings.video_output(), settings.vsync_enabled())
+                (settings.video_output(), settings.vsync_enabled(), settings.frame_pacing())
             };
             if want != "cpu" {
-                match GpuSink::new(GPUI_WINDOW_TITLE, (fake::WIDTH, fake::HEIGHT), vsync) {
+                let config = GpuSinkConfig {
+                    vsync,
+                    paced,
+                    frame_period_us: 1_000_000 / fake::FPS,
+                };
+                match GpuSink::new(GPUI_WINDOW_TITLE, (fake::WIDTH, fake::HEIGHT), config) {
                     Ok(sink) => {
                         let h = sink.handle();
                         tracing::info!("FAKE-Stream: GPU-Sink aktiv (Upload-Pfad, {}x{})", fake::WIDTH, fake::HEIGHT);
@@ -1378,21 +1384,31 @@ impl StreamUiState {
             _ => "—".to_string(),
         };
         let gen = presenter.as_ref().map(|p| p.frames_generated).unwrap_or(0);
-        let (uploads, sink_drops, collapsed, too_fast, dt_ema) = match &sink {
+        let (uploads, sink_drops, too_fast, dt_ema, dt_min, dt_max, jit) = match &sink {
             Some(s) => (
                 (s.cpu_uploads + s.d3d11_copies).to_string(),
                 s.frames_dropped.to_string(),
-                s.burst_collapsed.to_string(),
                 s.present_too_fast.to_string(),
                 format!("{} µs", s.present_dt_ema_us),
+                format!("{}", s.present_dt_min_us),
+                format!("{}", s.present_dt_max_us),
+                format!("{} µs", s.present_jitter_ema_us),
             ),
-            None => ("—".to_string(), "—".to_string(), "—".to_string(), "—".to_string(), "—".to_string()),
+            None => (
+                "—".to_string(),
+                "—".to_string(),
+                "—".to_string(),
+                "—".to_string(),
+                "—".to_string(),
+                "—".to_string(),
+                "—".to_string(),
+            ),
         };
 
         format!(
             "presented {fps:.1} fps (drops {drops}) | media {media_ms:.1} ms (dec {dec} / vsr {vsr}) \
              | slot-drops {slot_drops} | conv {conv} | sink {gen}/{uploads}/{sink_drops} \
-             | burst {collapsed}, too-fast {too_fast}, dt {dt_ema}",
+             | too-fast {too_fast}, dt {dt_ema} ({dt_min}..{dt_max}), jit {jit}",
         )
     }
 

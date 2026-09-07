@@ -234,6 +234,22 @@ pub(crate) fn sections(
         true,
         s.vsync_enabled(),
     ));
+    // frame_pacing: Der Sink präsentiert Frames an einem gleichmäßigen
+    // 1/FPS-Takt statt bei Netzwerk-Ankunft — Burst-Paare werden auf
+    // Folge-Ticks verteilt (das libplacebo-Frame-Mixer-Verhalten des
+    // C++-Clients). Kostet im Mittel ~8 ms Latenz bei 60 fps.
+    rendering.push(toggle_row(
+        "video-frame-pacing",
+        "Frame pacing",
+        Some(
+            "An = gleichmäßiger Anzeigetakt (1/FPS), glättet unregelmäßige \
+             Frame-Ankunft — kostet bis zu 1 Bild Latenz. Wirksam beim \
+             nächsten Session-Start (GPU-Videopfad)",
+        ),
+        "frame pacing smooth judder cadence takt",
+        true,
+        s.frame_pacing(),
+    ));
     rendering.push(inactive(
         select_row(
             "video-render-backend",
