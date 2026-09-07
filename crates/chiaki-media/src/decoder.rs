@@ -114,6 +114,28 @@ impl Plane {
     }
 }
 
+impl DecodedFrame {
+    /// CPU-Frames: Planes als sichere Slices `(Y, UV)` — `stride*Zeilen`
+    /// Bytes je Ebene (UV hat halbe Zeilenzahl). `None` bei GPU-Frames
+    /// ([`FrameMemory::CudaDevice`]/[`FrameMemory::D3d11Texture`]).
+    ///
+    /// SAFETY-Hinweis: Die Slices lesen die echten NVDEC-/FFmpeg-Pool-Pointer
+    /// für `stride * Zeilen` Bytes — der Pool gilt nur bis zum nächsten
+    /// `decode_*`-Aufruf (Lifetime-Vertrag der Struktur).
+    pub fn nv12_cpu_planes(&self) -> Option<(&[u8], &[u8])> {
+        if self.memory != FrameMemory::Cpu {
+            return None;
+        }
+        let h = self.height as usize;
+        let (ys, uvs) = (self.planes[0].stride, self.planes[1].stride);
+        unsafe {
+            let y = std::slice::from_raw_parts(self.planes[0].as_ptr(), ys * h);
+            let uv = std::slice::from_raw_parts(self.planes[1].as_ptr(), uvs * (h / 2));
+            Some((y, uv))
+        }
+    }
+}
+
 /// Dekodierter Frame — CPU-Pfad: immer NV12 (siehe Moduldokumentation);
 /// GPU-Pfad ([`FrameMemory::CudaDevice`]/[`FrameMemory::D3d11Texture`]):
 /// Daten bleiben auf der GPU (raw HW-Output).

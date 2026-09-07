@@ -9,6 +9,7 @@
 #![deny(unsafe_code)]
 
 pub mod cli;
+pub mod virtualcam_headless;
 
 pub use chiaki_steam as steam;
 

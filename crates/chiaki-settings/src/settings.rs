@@ -935,6 +935,33 @@ impl Settings {
     // (Rust-Erweiterung, kein C++-Pendant — C++ machte das im libplacebo-
     // Frame-Mixer). Default aus = minimale Latenz.
     acc_bool!(frame_pacing, set_frame_pacing, "settings/frame_pacing", false);
+    // Virtual-Cam-Feed (HANDOFF §8 — dokumentierte Rust-Erweiterung, kein
+    // C++-Pendant): Stream-Inhalt in die „OBS Virtual Camera“ feeden.
+    // enabled = Feed während Sessions; autostart = Headless-Start mit
+    // Windows (Registry-Run-Key führt die App mit --virtualcam); Auflösung
+    // "stream"|"720p"|"1080p" (Kamera-Standard, kein Upscale).
+    acc_bool!(virtualcam_enabled, set_virtualcam_enabled, "settings/virtualcam_enabled", false);
+    acc_bool!(virtualcam_autostart, set_virtualcam_autostart, "settings/virtualcam_autostart", false);
+    acc_string!(virtualcam_resolution_raw, set_virtualcam_resolution_raw, "settings/virtualcam_resolution");
+
+    pub fn virtualcam_resolution(&self) -> String {
+        match self.virtualcam_resolution_raw().as_str() {
+            "720p" => "720p".to_string(),
+            "1080p" => "1080p".to_string(),
+            _ => "stream".to_string(),
+        }
+    }
+
+    pub fn set_virtualcam_resolution(&mut self, value: &str) {
+        let value = match value {
+            "720p" => "720p",
+            "1080p" => "1080p",
+            _ => "stream",
+        };
+        self.store
+            .set_value("settings/virtualcam_resolution", Value::Str(value.to_string()));
+    }
+
     acc_bool!(hide_cursor, set_hide_cursor, "settings/hide_cursor", true);
     acc_bool!(show_stream_stats, set_show_stream_stats, "settings/show_stream_stats", false);
     acc_bool!(show_vsr_badge, set_show_vsr_badge, "settings/show_vsr_badge", true);

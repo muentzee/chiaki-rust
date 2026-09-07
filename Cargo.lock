@@ -1029,6 +1029,8 @@ dependencies = [
  "chiaki-settings",
  "chiaki-steam",
  "chiaki-ui",
+ "chiaki-virtualcam",
+ "ctrlc",
  "thiserror 2.0.20",
  "tracing",
  "tracing-subscriber",
@@ -1177,12 +1179,24 @@ dependencies = [
  "chiaki-render",
  "chiaki-settings",
  "chiaki-steam",
+ "chiaki-virtualcam",
  "gpui",
  "thiserror 2.0.20",
  "tracing",
  "tracing-subscriber",
  "windows 0.58.0",
  "wry",
+]
+
+[[package]]
+name = "chiaki-virtualcam"
+version = "1.10.0"
+dependencies = [
+ "thiserror 2.0.20",
+ "tracing",
+ "virtualcam",
+ "windows 0.58.0",
+ "winreg 0.52.0",
 ]
 
 [[package]]
@@ -8024,6 +8038,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b857e6f99efe1e1eb1e4dfb035de8ae7ec8ec56bd1928edcbd7c6e4427634d52"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "virtualcam"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75b4c9213a68f37aab7348490725678a10c824a0d1166bdcf4cc0172137188e1"
+dependencies = [
+ "anyhow",
+ "libc",
+ "log",
+ "thiserror 2.0.20",
+ "windows 0.61.3",
+ "winreg 0.52.0",
 ]
 
 [[package]]

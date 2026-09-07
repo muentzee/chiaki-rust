@@ -17,6 +17,11 @@ pub struct Args {
     /// `--profile <name>` — Verbindungsprofil (`profiles/<name>.ini` statt
     /// `settings.ini`), für Steam-Shortcut-Launch-Options.
     pub profile: Option<String>,
+    /// `--virtualcam [host]` — headless Virtual-Cam-Modus (HANDOFF §8/V2):
+    /// Session + Media-Pipeline ohne gpui/Sink; Video landet in der
+    /// virtuellen Kamera, Ton bleibt lokal. Wert = Nickname des registrierten
+    /// Hosts (ohne Wert: der erste zugeordnete manuelle Host).
+    pub virtualcam: Option<Option<String>>,
 }
 
 /// Ergebnis des Parsings: App starten oder nur Hilfe ausgeben.
@@ -43,8 +48,24 @@ pub fn parse(argv: &[String]) -> Result<Parsed, String> {
                 })?;
                 args.profile = Some(value.clone());
             }
+            "--virtualcam" | "-virtualcam" => {
+                // Optionaler Wert: das nächste Argument gehört nur dann dazu,
+                // wenn es keine Option ist (`--virtualcam --profile x`).
+                let value = match argv.get(i + 1) {
+                    Some(v) if !v.starts_with('-') => {
+                        i += 1;
+                        Some(Some(v.clone()))
+                    }
+                    _ => Some(None),
+                };
+                args.virtualcam = value;
+            }
             _ if arg.starts_with("--profile=") || arg.starts_with("-profile=") => {
                 args.profile = Some(arg.split_once('=').expect("Präfix geprüft").1.to_string());
+            }
+            _ if arg.starts_with("--virtualcam=") || arg.starts_with("-virtualcam=") => {
+                let value = arg.split_once('=').expect("Präfix geprüft").1.to_string();
+                args.virtualcam = Some((!value.is_empty()).then_some(value));
             }
             _ => {
                 return Err(format!("Unbekanntes Argument '{arg}'"));
@@ -66,6 +87,12 @@ Usage: chiaki [Optionen]
 Optionen:
   --profile <name>  Verbindungsprofil laden (profiles/<name>.ini statt
                     settings.ini); für Steam-Shortcut-Launch-Options.
+  --virtualcam [host]
+                    Headless-Virtualcam-Modus: streamt zum Host in die
+                    virtuelle Kamera (OBS Virtual Camera), Ton bleibt lokal.
+                    host = Nickname aus der Host-Registry oder eine IP-
+                    Adresse; ohne Angabe wird der erste zugeordnete
+                    manuelle Host benutzt.
   -h, --help        Diesen Hilfetext anzeigen und beenden.
 "
     .to_string()
@@ -85,7 +112,8 @@ mod tests {
         assert_eq!(
             parsed,
             Parsed::Run(Args {
-                profile: None
+                profile: None,
+                virtualcam: None,
             })
         );
     }
@@ -97,7 +125,8 @@ mod tests {
         assert_eq!(
             parsed,
             Parsed::Run(Args {
-                profile: Some("PS5 Wohnzimmer".to_string())
+                profile: Some("PS5 Wohnzimmer".to_string()),
+                virtualcam: None,
             })
         );
     }
@@ -109,14 +138,16 @@ mod tests {
         assert_eq!(
             parsed,
             Parsed::Run(Args {
-                profile: Some("default".to_string())
+                profile: Some("default".to_string()),
+                virtualcam: None,
             })
         );
         let parsed = parse(&argv(&["-profile=default"])).expect("-profile=name muss parsen");
         assert_eq!(
             parsed,
             Parsed::Run(Args {
-                profile: Some("default".to_string())
+                profile: Some("default".to_string()),
+                virtualcam: None,
             })
         );
     }
@@ -127,7 +158,8 @@ mod tests {
         assert_eq!(
             parsed,
             Parsed::Run(Args {
-                profile: Some("deck".to_string())
+                profile: Some("deck".to_string()),
+                virtualcam: None,
             })
         );
     }
@@ -159,7 +191,8 @@ mod tests {
         assert_eq!(
             parsed,
             Parsed::Run(Args {
-                profile: Some("b".to_string())
+                profile: Some("b".to_string()),
+                virtualcam: None,
             })
         );
     }
@@ -169,5 +202,59 @@ mod tests {
         let text = help_text();
         assert!(text.contains("--profile"));
         assert!(text.contains("--help"));
+    }
+
+    #[test]
+    fn virtualcam_without_host() {
+        let parsed = parse(&argv(&["--virtualcam"])).expect("muss parsen");
+        assert_eq!(
+            parsed,
+            Parsed::Run(Args { profile: None, virtualcam: Some(None) })
+        );
+        // =-Form
+        let parsed = parse(&argv(&["--virtualcam="])).expect("muss parsen");
+        assert_eq!(
+            parsed,
+            Parsed::Run(Args { profile: None, virtualcam: Some(None) })
+        );
+    }
+
+    #[test]
+    fn virtualcam_with_host_nickname() {
+        let parsed = parse(&argv(&["--virtualcam", "PS5 Wohnzimmer"])).expect("muss parsen");
+        assert_eq!(
+            parsed,
+            Parsed::Run(Args {
+                profile: None,
+                virtualcam: Some(Some("PS5 Wohnzimmer".to_string())),
+            })
+        );
+        // =-Form
+        let parsed = parse(&argv(&["-virtualcam=deck"])).expect("muss parsen");
+        assert_eq!(
+            parsed,
+            Parsed::Run(Args {
+                profile: None,
+                virtualcam: Some(Some("deck".to_string())),
+            })
+        );
+    }
+
+    #[test]
+    fn virtualcam_option_not_swallowed_as_value() {
+        // Das nächste Argument ist eine Option → gehört NICHT zu --virtualcam.
+        let parsed = parse(&argv(&["--virtualcam", "--profile", "deck"])).expect("muss parsen");
+        assert_eq!(
+            parsed,
+            Parsed::Run(Args {
+                profile: Some("deck".to_string()),
+                virtualcam: Some(None),
+            })
+        );
+    }
+
+    #[test]
+    fn help_text_mentions_virtualcam() {
+        assert!(help_text().contains("--virtualcam"));
     }
 }

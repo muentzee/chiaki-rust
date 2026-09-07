@@ -60,6 +60,19 @@ fn real_main(args: Args) -> ExitCode {
     #[cfg(windows)]
     init_process_priority();
 
+    // Headless-Virtualcam-Modus (HANDOFF §8/V2): Session + Media-Pipeline
+    // ohne gpui-Fenster — Video in die virtuelle Kamera, Ton bleibt lokal.
+    if let Some(vcam_host) = args.virtualcam.clone() {
+        return match chiaki_app::virtualcam_headless::run(vcam_host, args.profile.clone()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("chiaki --virtualcam: {e}");
+                tracing::error!("Headless-Virtualcam fehlgeschlagen: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
     match chiaki_ui::run(args.profile) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

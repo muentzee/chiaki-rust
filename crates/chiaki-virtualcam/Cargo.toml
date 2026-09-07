@@ -1,0 +1,30 @@
+[package]
+name = "chiaki-virtualcam"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tracing.workspace = true
+thiserror.workspace = true
+# OBS-Virtual-Camera-Anbindung (Entscheidung HANDOFF §8/D7): das OBS-Backend
+# des Crates schreibt die Shared-Memory-Queue (`OBSVirtualCamVideo`), die der
+# bei der OBS-Installation registrierte DirectShow-Filter („OBS Virtual
+# Camera") konsumiert — Discord/OBS binden die Kamera ganz normal ein.
+# Lizenz AGPL-3.0 passt zur Workspace-Lizenz. Nur das OBS-Backend: das
+# Media-Foundation-Backend braucht eine separate VCam-Runtime-Installation
+# (Win11), v4l2 ist Linux-only.
+virtualcam = { version = "1.0.0", default-features = false, features = ["obs"] }
+winreg = "0.52"
+
+[dev-dependencies]
+# probe_filter-Example: direkte COM-Inspektion des registrierten OBS-Filters.
+windows = { workspace = true, features = [
+    "Win32_System_Com",
+    "Win32_System_Memory",
+    "Win32_Foundation",
+    "Win32_Media_DirectShow",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_Multimedia",
+] }

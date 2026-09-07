@@ -18,7 +18,8 @@ use crate::app::AppShell;
 use crate::components::SelectOption;
 
 use super::{
-    inactive, opts, select_row, slider_row, text_row, toggle_row, Section, SRow,
+    inactive, opts, select_row, slider_row, text_row, toggle_row, toggle_row_with, info_row,
+    Section, SRow,
 };
 
 pub(crate) fn sections(
@@ -502,6 +503,75 @@ pub(crate) fn sections(
         s.overlay_debug(),
     ));
 
+    // Virtuelle Kamera (HANDOFF §8): Stream-Inhalt in die „OBS Virtual
+    // Camera“ feeden — Discord/OBS binden sie als normale Webcam ein.
+    // Verfügbarkeit einmalig pro Seitenaufruf im Seiten-Zustand cachen
+    // (RegOpenKey, nicht pro Frame).
+    let cam_available = {
+        let state = cx.global_mut::<SettingsUiState>();
+        if state.virtualcam_available.is_none() {
+            state.virtualcam_available = Some(chiaki_virtualcam::obs_virtualcam_available());
+        }
+        state.virtualcam_available.unwrap_or(false)
+    };
+    let mut virtualcam = Section::new("Virtuelle Kamera");
+    virtualcam.push(toggle_row(
+        "video-virtualcam-enabled",
+        "Virtual camera feed",
+        Some(
+            "Feeding the stream into the OBS Virtual Camera (Discord/OBS bind it as a webcam) — \
+             live during sessions only, effective from the next session start",
+        ),
+        "virtual camera webcam obs discord stream feed",
+        true,
+        s.virtualcam_enabled(),
+    ));
+    virtualcam.push(select_row(
+        "video-virtualcam-resolution",
+        "Camera resolution",
+        Some(
+            "Camera output size — stream resolution (pre-VSR) or downscale to 720p/1080p; \
+             effective on the next session start",
+        ),
+        "virtual camera resolution 720 1080 downscale",
+        true,
+        opts(&[
+            ("stream", "Stream resolution"),
+            ("720p", "720p"),
+            ("1080p", "1080p"),
+        ]),
+        &s.virtualcam_resolution(),
+        |v, s| s.set_virtualcam_resolution(v),
+    ));
+    virtualcam.push(info_row(
+        if cam_available {
+            "Status: OBS Virtual Camera found — bind it in Discord/OBS as a webcam. \
+             After the first session, restart Discord so it lists the camera. \
+             OBS must not run its own Virtual Camera at the same time (one writer)."
+        } else {
+            "Status: OBS Virtual Camera not found — install OBS Studio (the Virtual Camera is \
+             registered with OBS) or start OBS's Virtual Camera once."
+        },
+        "virtual camera status obs installed discord",
+    ));
+    virtualcam.push(toggle_row_with(
+        "video-virtualcam-autostart",
+        "Start with Windows (headless camera)",
+        Some(
+            "Registers the app with --virtualcam in the autostart (headless feed + audio, \
+             no window)",
+        ),
+        "virtual camera autostart windows headless background",
+        true,
+        s.virtualcam_autostart(),
+        |v, s| {
+            s.set_virtualcam_autostart(v);
+            if let Err(err) = chiaki_virtualcam::set_autostart(v) {
+                tracing::warn!("Autostart der virtuellen Kamera: {err}");
+            }
+        },
+    ));
+
     let ft_display_reason = "libplacebo-Display-Ziel nicht portiert — nur INI-Kompatibilität";
     let mut display = Section::new("Display");
     display.push(inactive(
@@ -636,7 +706,7 @@ pub(crate) fn sections(
         ft_display_reason,
     ));
 
-    sections.extend([window, rendering, vsr_section, overlay, display]);
+    sections.extend([window, rendering, vsr_section, virtualcam, overlay, display]);
 
     // Rendering-Fine-Tuning (libplacebo) — nur beim Custom-Preset sichtbar
     // (wie QML `visible: filterMatch && videoPreset === 5`); die

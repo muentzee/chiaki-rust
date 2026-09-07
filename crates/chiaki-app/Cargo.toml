@@ -22,10 +22,13 @@ chiaki-render.workspace = true
 chiaki-input.workspace = true
 chiaki-settings.workspace = true
 chiaki-steam.workspace = true
+chiaki-virtualcam.workspace = true
 chiaki-ui.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
+# Ctrl+C-Handling des Headless-Virtualcam-Modus (gleiche Crate wie chiaki-cli)
+ctrlc = "3" 
 
 # Prozess-Initialisierung des Binaries: HIGH_PRIORITY_CLASS wie gui/src/main.cpp
 # (SetPriorityClass, Win32_System_Threading — Features kommen aus der

@@ -19,7 +19,9 @@
 //!   und Mikrofon ([`audio::AudioInput`], Capture → Opus-40-Byte-Frames)
 
 pub mod audio;
+pub mod cuda_copy;
 pub mod cuda_d3d11;
+pub mod d3d11_copy;
 pub mod decoder;
 pub mod ffmpeg;
 pub mod opus;

@@ -15,9 +15,9 @@ libloading = "0.8"
 num_enum = "0.7"
 # WASAPI-Audio-Output/-Input (Mikrofon) — safe Rust, kein FFI nötig
 cpal = "0.15"
+# D3D11-Staging-Download für den Virtual-Cam-Feed (d3d11_copy, D3D11VA-Pfad)
+windows.workspace = true
 
 [dev-dependencies]
 hex = "0.4"
 tracing-subscriber.workspace = true
-# D3D11-Readback-Repro für den CUDA-Interop-Zoom-Bug (tests/vsr_interop_zoom.rs)
-windows.workspace = true

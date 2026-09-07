@@ -548,6 +548,38 @@ impl StreamUiState {
                 }
             }
         }
+        // Virtual-Cam-Feed auch im FAKE-Modus (settings/virtualcam_enabled):
+        // der Testpattern-Stream landet in der „OBS Virtual Camera" — der
+        // komplette Feed-Pfad ist so ohne Konsole gegenprüfbar (ffmpeg dshow).
+        let cam = {
+            let enabled = {
+                let settings = self.backend.settings().lock().unwrap_or_else(|e| e.into_inner());
+                settings.virtualcam_enabled()
+            };
+            if enabled {
+                match chiaki_virtualcam::CamFeed::open(chiaki_virtualcam::CamFeedConfig {
+                    width: fake::WIDTH,
+                    height: fake::HEIGHT,
+                    fps: fake::FPS,
+                    resolution: chiaki_virtualcam::CamResolution::from_ini_value(
+                        &self
+                            .backend
+                            .settings()
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .virtualcam_resolution(),
+                    ),
+                }) {
+                    Ok(feed) => Some(feed),
+                    Err(err) => {
+                        tracing::error!("FAKE-Stream: Virtuelle Kamera nicht verfügbar: {err}");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        };
         fake::start(
             presenter.clone(),
             Arc::clone(&telemetry),
@@ -555,6 +587,7 @@ impl StreamUiState {
             Arc::clone(&connected),
             if pin_enabled { Some(Arc::clone(&pin_flag)) } else { None },
             gpu_handle,
+            cam,
         );
         self.presenter = Some(presenter);
         self.telemetry = Some(telemetry);

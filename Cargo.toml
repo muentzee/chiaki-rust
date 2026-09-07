@@ -8,6 +8,7 @@ members = [
     "crates/chiaki-input",
     "crates/chiaki-settings",
     "crates/chiaki-steam",
+    "crates/chiaki-virtualcam",
     "crates/chiaki-ui",
     "crates/chiaki-app",
     "crates/chiaki-cli",
@@ -27,6 +28,7 @@ chiaki-render = { path = "crates/chiaki-render" }
 chiaki-input = { path = "crates/chiaki-input" }
 chiaki-settings = { path = "crates/chiaki-settings" }
 chiaki-steam = { path = "crates/chiaki-steam" }
+chiaki-virtualcam = { path = "crates/chiaki-virtualcam" }
 chiaki-ui = { path = "crates/chiaki-ui" }
 thiserror = "2"
 tracing = "0.1"

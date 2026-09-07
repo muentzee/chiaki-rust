@@ -97,6 +97,9 @@ pub struct SettingsUiState {
     /// Audio-Geräte (Laufzeit-Enumeration chiaki-media; pro Frame gecacht).
     pub audio_out_devices: Vec<String>,
     pub audio_in_devices: Vec<String>,
+    /// Virtual-Cam-Status (OBS-Filter registriert?) — einmalig pro
+    /// Settings-Besuch geprüft (Registry), nicht pro Frame.
+    pub virtualcam_available: Option<bool>,
 }
 
 impl Global for SettingsUiState {}
@@ -124,6 +127,7 @@ impl SettingsUiState {
             vsr_path_focus: cx.focus_handle(),
             audio_out_devices: Vec::new(),
             audio_in_devices: Vec::new(),
+            virtualcam_available: None,
         }
     }
 }
@@ -552,6 +556,7 @@ fn set_bool(s: &mut chiaki_settings::settings::Settings, id: &str, value: bool) 
         "video-use-zero-copy" => s.set_use_zero_copy(value),
         "video-vsync" => s.set_vsync_enabled(value),
         "video-frame-pacing" => s.set_frame_pacing(value),
+        "video-virtualcam-enabled" => s.set_virtualcam_enabled(value),
         "video-vulkan-deferred-swap" => s.set_vulkan_deferred_swap(value),
         "video-nv-vsr" => s.set_nv_vsr_enabled(value),
         "video-show-vsr-badge" => s.set_show_vsr_badge(value),

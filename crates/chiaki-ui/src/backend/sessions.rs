@@ -85,6 +85,7 @@ use chiaki_render::gpu_sink::GpuSinkHandle;
 use chiaki_render::presenter::VideoPresenter;
 use chiaki_settings::hosts::{self, HostMac, ManualHost, RegisteredHost};
 use chiaki_settings::settings::{RumbleHapticsIntensity, Settings};
+use chiaki_virtualcam::{CamFeed, CamFeedConfig, CamResolution};
 
 use super::DiscoveryHandle;
 use super::events::{HostId, RegistUiEvent, UiEvent, UiEventSender};
@@ -154,6 +155,11 @@ pub struct StreamTelemetry {
     /// FRAME-TIME-Badge im GPU-Pfad (dort bleibt der Presenter ungenutzt).
     /// 0 = noch keine Messung.
     pub media_frame_us: AtomicU32,
+    /// Virtual-Cam-Feed: in die virtuelle Kamera gesendete Frames
+    /// (Media-Thread; HANDOFF §8). 0 = Feed aus oder noch kein Frame.
+    pub cam_frames: AtomicU64,
+    /// Virtual-Cam-Feed: verworfene Frames (Kamera-Send/Pack-Fehler).
+    pub cam_errors: AtomicU64,
 }
 
 impl StreamTelemetry {
@@ -279,6 +285,10 @@ pub(crate) struct MediaSettings {
     pub frame_pacing: bool,
     /// GPU-Pfad (settings/video_output) — `None` = klassischer Presenter-Pfad.
     pub gpu: Option<GpuPath>,
+    /// Virtuelle Kamera (settings/virtualcam_enabled) — im `connect` geöffnet
+    /// und vom Media-Thread besessen (HANDOFF §8); `Drop` im Media-Thread
+    /// schließt die Kamera (Queue-STOPPING + Mapping frei).
+    pub virtualcam: Option<CamFeed>,
 }
 
 /// Art des GPU-Pfads (Spike-Variante b).
@@ -345,6 +355,7 @@ impl MediaSettings {
             vsync: settings.vsync_enabled(),
             frame_pacing: settings.frame_pacing(),
             gpu: None, // wird in connect() entschieden (needs Profil-Auflösung)
+            virtualcam: None, // wird in connect() geöffnet (Settings + Profil)
         }
     }
 }
@@ -931,6 +942,29 @@ impl SessionManager {
             } else {
                 None
             }
+        };
+
+        // Virtuelle Kamera (settings/virtualcam_enabled, HANDOFF §8):
+        // Öffnen mit der Stream-Auflösung VOR VSR (Kamera-Standard); Fehler
+        // = Toast + Stream läuft ohne Kamera weiter.
+        media.virtualcam = if settings.virtualcam_enabled() {
+            match CamFeed::open(CamFeedConfig {
+                width: connect_info.video_profile.width,
+                height: connect_info.video_profile.height,
+                fps: media.max_fps,
+                resolution: CamResolution::from_ini_value(&settings.virtualcam_resolution()),
+            }) {
+                Ok(feed) => Some(feed),
+                Err(err) => {
+                    tracing::error!("Virtuelle Kamera nicht verfügbar: {err}");
+                    self.events.send(UiEvent::Toast(
+                        ToastData::new(ToastKind::Warn, "Virtuelle Kamera aus").message(err),
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
         };
         drop(settings);
 
@@ -1579,7 +1613,10 @@ struct MediaTimings {
     use super::{haptics_rumble_fallback, ActiveSession, FeedbackCmd, FeedbackSink, GpuPathKind, MediaCmd, MediaSettings};
     use chiaki_core::ChiakiResult;
     use chiaki_input::HapticsPlayer;
+    use windows::core::Interface as _;
+    use chiaki_media::cuda_copy::CudaCopier;
     use chiaki_media::cuda_d3d11::CudaD3d11Interop;
+    use chiaki_media::d3d11_copy::D3d11Nv12Downloader;
     use chiaki_media::decoder::{DecodedFrame, DecoderOpts, FrameMemory, HwBackend};
     use chiaki_media::opus::OpusAudioDecoder;
     use chiaki_media::vsr::FrameBuf;
@@ -1590,7 +1627,7 @@ struct MediaTimings {
     use std::time::Duration;
 
     pub(super) fn run(
-        settings: MediaSettings,
+        mut settings: MediaSettings,
         rx: Receiver<MediaCmd>,
         session: ActiveSession,
         feedback: Option<FeedbackSink>,
@@ -1717,6 +1754,19 @@ struct MediaTimings {
         // --- Haptics/Mic ---
         let mut haptics: Option<HapticsPlayer> = None;
         let mut mic: Option<AudioInput> = None;
+
+        // --- Virtual-Cam-Feed (HANDOFF §8) ---
+        // Media-Thread besitzt die Kamera (Drop = Mapping frei). GPU-Frames
+        // werden vor dem Feed in den Systemspeicher geholt: CUDA-Planes per
+        // cuMemcpy2D (CudaVsrInterop-Pfad), D3D11-Surface per Staging-Textur
+        // (D3D11VA-Pfad). Fehler werden einmalig geloggt, der Feed läuft
+        // mit dem nächsten Frame weiter.
+        let mut cam = settings.virtualcam.take();
+        let mut cam_copier: Option<CudaCopier> = None;
+        let mut cam_d3d11: Option<D3d11Nv12Downloader> = None;
+        let mut cam_gpu_buf: Vec<u8> = Vec::new();
+        let mut cam_gpu_buf_uv: Vec<u8> = Vec::new();
+        let mut cam_gpu_error_logged = false;
 
         loop {
             match rx.recv_timeout(Duration::from_millis(5)) {
@@ -1867,6 +1917,173 @@ struct MediaTimings {
                     t.samples += 1;
                     match decoded {
                         Ok(Some(frame)) => {
+                            // --- Virtual-Cam-Feed (HANDOFF §8): JEDEN deko-
+                            // dierten Frame VOR VSR in die virtuelle Kamera
+                            // (Default: Stream-Auflösung als Kamera-Format).
+                            if let Some(feed) = cam.as_mut() {
+                                match frame.memory {
+                                    FrameMemory::Cpu => unsafe {
+                                        // SAFETY: wie nv12_from_planes — die
+                                        // Pool-Pointer sind für `stride*Zeilen`
+                                        // Bytes lesbar (gültig bis zum nächsten
+                                        // Decode; synchroner Kopiervorgang).
+                                        let h = frame.height as usize;
+                                        let (ys, uvs) =
+                                            (frame.planes[0].stride, frame.planes[1].stride);
+                                        let y = std::slice::from_raw_parts(
+                                            frame.planes[0].as_ptr(),
+                                            ys * h,
+                                        );
+                                        let uv = std::slice::from_raw_parts(
+                                            frame.planes[1].as_ptr(),
+                                            uvs * (h / 2),
+                                        );
+                                        feed.push_nv12(
+                                            frame.width, frame.height, y, ys, uv, uvs,
+                                        );
+                                    }
+                                    FrameMemory::CudaDevice => {
+                                        if cam_copier.is_none() {
+                                            match CudaCopier::new() {
+                                                Ok(copier) => cam_copier = Some(copier),
+                                                Err(err) => {
+                                                    cam_gpu_error_logged = true;
+                                                    tracing::warn!(
+                                                        "Kamera-Feed: CUDA-Download nicht möglich ({err}) — Feed leer"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        if let (Some(copier), Some(ctx), Some(stream)) = (
+                                            cam_copier.as_ref(),
+                                            decoder.cuda_context(),
+                                            decoder.cuda_stream(),
+                                        ) {
+                                            // SAFETY: Device-Planes aus dem
+                                            // Decoder-Kontext, gültig bis zum
+                                            // nächsten Decode (synchron).
+                                            let r = unsafe {
+                                                copier.download_nv12(
+                                                    ctx,
+                                                    stream,
+                                                    frame.planes[0].as_ptr(),
+                                                    frame.planes[0].stride,
+                                                    frame.planes[1].as_ptr(),
+                                                    frame.planes[1].stride,
+                                                    frame.width,
+                                                    frame.height,
+                                                    &mut cam_gpu_buf,
+                                                )
+                                            };
+                                            match r {
+                                                Ok(()) => {
+                                                    let (w, h) = (
+                                                        frame.width as usize,
+                                                        frame.height as usize,
+                                                    );
+                                                    feed.push_nv12(
+                                                        frame.width,
+                                                        frame.height,
+                                                        &cam_gpu_buf[..w * h],
+                                                        w,
+                                                        &cam_gpu_buf[w * h..],
+                                                        w,
+                                                    );
+                                                }
+                                                Err(err) if !cam_gpu_error_logged => {
+                                                    cam_gpu_error_logged = true;
+                                                    tracing::warn!(
+                                                        "Kamera-Feed: CUDA-Download fehlgeschlagen ({err})"
+                                                    );
+                                                }
+                                                Err(_) => {}
+                                            }
+                                        }
+                                    }
+                                    FrameMemory::D3d11Texture {
+                                        texture,
+                                        subresource,
+                                    } => {
+                                        if cam_d3d11.is_none() {
+                                            cam_d3d11 = session.gpu.as_ref().and_then(|g| {
+                                                let dev = g.d3d11_device_addref();
+                                                let ctx = g.d3d11_context_addref();
+                                                match D3d11Nv12Downloader::new(
+                                                    dev,
+                                                    ctx,
+                                                    frame.width,
+                                                    frame.height,
+                                                ) {
+                                                    Ok(downloader) => Some(downloader),
+                                                    Err(err) => {
+                                                        // +1-Referenzen (Sink-
+                                                        // AddRef) wieder freigeben.
+                                                        unsafe {
+                                                            drop(
+                                                                windows::Win32::Graphics::Direct3D11::ID3D11Device::from_raw(
+                                                                    dev as *mut _,
+                                                                ),
+                                                            );
+                                                            drop(
+                                                                windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext::from_raw(
+                                                                    ctx as *mut _,
+                                                                ),
+                                                            );
+                                                        }
+                                                        cam_gpu_error_logged = true;
+                                                        tracing::warn!(
+                                                            "Kamera-Feed: D3D11-Download nicht möglich ({err})"
+                                                        );
+                                                        None
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        if let Some(downloader) = cam_d3d11.as_mut() {
+                                            // SAFETY: Textur stammt aus dem
+                                            // Decoder (Sink-Device, Surface bis
+                                            // zum nächsten Decode gültig); das
+                                            // Device läuft mit MT-Protect (Sink).
+                                            let r = unsafe {
+                                                downloader.download(
+                                                    texture,
+                                                    subresource,
+                                                    &mut cam_gpu_buf,
+                                                    &mut cam_gpu_buf_uv,
+                                                )
+                                            };
+                                            match r {
+                                                Ok(()) => {
+                                                    let w = frame.width as usize;
+                                                    feed.push_nv12(
+                                                        frame.width,
+                                                        frame.height,
+                                                        &cam_gpu_buf,
+                                                        w,
+                                                        &cam_gpu_buf_uv,
+                                                        w,
+                                                    );
+                                                }
+                                                Err(err) if !cam_gpu_error_logged => {
+                                                    cam_gpu_error_logged = true;
+                                                    tracing::warn!(
+                                                        "Kamera-Feed: D3D11-Download fehlgeschlagen ({err})"
+                                                    );
+                                                }
+                                                Err(_) => {}
+                                            }
+                                        }
+                                    }
+                                }
+                                session
+                                    .telemetry
+                                    .cam_frames
+                                    .store(feed.frames_sent(), Ordering::Relaxed);
+                                session
+                                    .telemetry
+                                    .cam_errors
+                                    .store(feed.errors(), Ordering::Relaxed);
+                            }
                             // VSR einmalig mit dem ersten Frame initialisieren
                             // (C++: init(firstFrame, scalePct), CUDA-Kontext
                             // aus dem Decoder) + im Interop-Modus die SDK-
@@ -2208,8 +2425,18 @@ struct MediaTimings {
                             out.dropped_samples(),
                         )
                     });
+                    // Virtual-Cam-Feed: kumulative Zähler + Format.
+                    let cam_line = cam.as_ref().map(|f| {
+                        format!(
+                            " | Kamera: gesendet {}, Fehler {}, {}x{}",
+                            f.frames_sent(),
+                            f.errors(),
+                            f.dims().0,
+                            f.dims().1,
+                        )
+                    });
                     tracing::info!(
-                        "Media-Pipeline (Ø über {} Frames, {} Samples): decode {:.2} ms, nv12-copy {:.2} ms, vsr {:.2} ms, out-take {:.2} ms — Summe {:.2} ms/Frame (Budget 16,7), pass-ema {:.2} ms | Presenter Δ: gen {}, präsentiert {}, UI-Drops {}, Slot-Drops {}{}{}",
+                        "Media-Pipeline (Ø über {} Frames, {} Samples): decode {:.2} ms, nv12-copy {:.2} ms, vsr {:.2} ms, out-take {:.2} ms — Summe {:.2} ms/Frame (Budget 16,7), pass-ema {:.2} ms | Presenter Δ: gen {}, präsentiert {}, UI-Drops {}, Slot-Drops {}{}{}{}",
                         t.frames, t.samples,
                         t.decode_us as f64 / n / 1000.0,
                         t.nv12_copy_us as f64 / n / 1000.0,
@@ -2223,6 +2450,7 @@ struct MediaTimings {
                         slot_dropped.saturating_sub(prev_slot_dropped),
                         sink_line.unwrap_or_default(),
                         audio_line.unwrap_or_default(),
+                        cam_line.unwrap_or_default(),
                     );
                     prev_presented = snap.frames_presented;
                     prev_generated = snap.frames_generated;
@@ -2238,6 +2466,16 @@ struct MediaTimings {
         }
 
         // --- Aufräumen auf DEMSELBEN Thread (!Send-Verträge) ---
+        // Kamera zuerst schließen (Queue STOPPING + Mapping frei — Konsumenten
+        // sehen danach kein Bild mehr), dann Audio/Haptics/Decoder.
+        if let Some(feed) = cam.take() {
+            tracing::info!(
+                "Virtuelle Kamera schließt: {} Frames gesendet, {} Fehler",
+                feed.frames_sent(),
+                feed.errors()
+            );
+            drop(feed);
+        }
         drop(mic); // AudioInput: Drain-Join + Capture-Stop
         drop(audio_out); // AudioOutput: cpal-Stream stoppen
         if let Some(player) = haptics {

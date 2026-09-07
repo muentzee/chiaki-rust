@@ -24,6 +24,8 @@ use chiaki_render::gpu_sink::GpuSinkHandle;
 use chiaki_render::nv12::NV12Frame;
 use chiaki_render::presenter::VideoPresenter;
 
+use chiaki_virtualcam::CamFeed;
+
 use crate::backend::sessions::StreamTelemetry;
 
 /// Fake-Stream-Auflösung (720p — klein genug für weiche 60 fps im
@@ -38,7 +40,9 @@ const BYTES_PER_SEC: u64 = 15_000_000 / 8;
 
 /// Startet den Fake-Producer-Thread (endet über `stop`). Mit `gpu` werden die
 /// Frames in den D3D11-Sink hochgeladen (submit_cpu — GPU-Pfad-Test ohne
-/// Konsole), sonst in den Presenter.
+/// Konsole), sonst in den Presenter. Mit `cam` wird derselbe Testpattern-
+/// Frame zusätzlich in die virtuelle Kamera gefeedt (HANDOFF §8 — macht den
+/// kompletten Kamera-Pfad ohne Konsole gegenprüfbar).
 pub fn start(
     presenter: VideoPresenter,
     telemetry: Arc<StreamTelemetry>,
@@ -46,10 +50,11 @@ pub fn start(
     connected: Arc<AtomicBool>,
     pin_requested: Option<Arc<AtomicBool>>,
     gpu: Option<GpuSinkHandle>,
+    cam: Option<CamFeed>,
 ) {
-    let spawned = std::thread::Builder::new()
-        .name("chiaki-ui-fake-stream".into())
-        .spawn(move || run(presenter, telemetry, stop, connected, pin_requested, gpu));
+    let spawned = std::thread::Builder::new().name("chiaki-ui-fake-stream".into()).spawn(
+        move || run(presenter, telemetry, stop, connected, pin_requested, gpu, cam),
+    );
     if let Err(err) = spawned {
         tracing::error!("Fake-Stream-Thread konnte nicht gestartet werden: {err}");
     }
@@ -62,6 +67,7 @@ fn run(
     connected: Arc<AtomicBool>,
     pin_requested: Option<Arc<AtomicBool>>,
     gpu: Option<GpuSinkHandle>,
+    mut cam: Option<CamFeed>,
 ) {
     let started = Instant::now();
     let mut pin_sent = false;
@@ -99,9 +105,22 @@ fn run(
         let frame = test_pattern(t, frame_index);
         // GPU-Sink vorhanden (settings/video_output) → Upload-Pfad testen.
         match &gpu {
-            Some(g) if !g.is_lost() => g.submit_cpu(frame),
-            _ => presenter.set_frame(frame),
+            Some(g) if !g.is_lost() => g.submit_cpu(frame.clone()),
+            _ => presenter.set_frame(frame.clone()),
         };
+        // Virtual-Cam-Feed: derselbe Frame in die virtuelle Kamera.
+        if let Some(feed) = cam.as_mut() {
+            feed.push_nv12(
+                WIDTH,
+                HEIGHT,
+                frame.y_plane(),
+                frame.y_stride,
+                frame.uv_plane(),
+                frame.uv_stride,
+            );
+            telemetry.cam_frames.store(feed.frames_sent(), Ordering::Relaxed);
+            telemetry.cam_errors.store(feed.errors(), Ordering::Relaxed);
+        }
         let frame_us = frame_t0.elapsed().as_micros() as u64;
         let prev = telemetry.media_frame_us.load(Ordering::Relaxed) as u64;
         let ema = if prev == 0 { frame_us } else { prev * 9 / 10 + frame_us / 10 };
