@@ -1,1 +1,8 @@
 target/
+
+# Build artifacts (rebuilt via scripts/build-portable-zip.ps1)
+chiaki-remaster-rs-win64-portable-*.zip
+chiaki-remaster-rs-win64-portable-*/
+live-test/*.h264
+live-test/*.h265
+data/chiaki-virtualcam.pid
