@@ -2,6 +2,8 @@
 
 A complete from-scratch Rust port of the [chiaki-ng](https://github.com/streetpea/chiaki-ng) PS5/PS4 remote-play client for **Windows x64**, with a native GPU UI, a fully GPU-resident video path, NVIDIA VSR upscaling, and an OBS virtual camera feed with a headless mode.
 
+> **Work in progress:** I develop this in my spare time and keep shipping improvements — expect regular updates and the occasional rough edge.
+
 **Measured in live LAN sessions against a real PS5** (RTX 4090, 1080p60 H.265, ~24 Mbit/s at motion):
 
 | Metric | Value |
@@ -12,6 +14,16 @@ A complete from-scratch Rust port of the [chiaki-ng](https://github.com/streetpe
 | Audio | Opus out/in, ~28 ms buffer (matches the C++ client's semantics) |
 | Decoder backends | NVDEC-CUDA, D3D11VA, Vulkan, software (auto or per setting) |
 | Test suite | 649 automated tests, including golden vectors verified byte-identical against the compiled C code |
+
+## Stream to Twitch or Discord — no capture card needed
+
+The classic console streaming setup needs a capture card. This client takes a different route: the PS5 stream is fed directly into the **OBS Virtual Camera**, so
+
+- **OBS** binds it as a plain video source and your Twitch/Kick/YouTube scene gets the gameplay — no capture card, no extra hardware.
+- **Discord** binds it as a regular webcam: show your game in a voice call while chatting.
+- With **NVIDIA VSR** enabled, viewers don't just see the stream — they see it upscaled to up to 4K, sharper than the PS5's own output.
+
+Handy for big console releases (GTA VI on PS5, for example): play on the couch, stream from the PC, nobody needs a capture card. Details in the virtual camera section below.
 
 ## Why this fork of reality exists
 
