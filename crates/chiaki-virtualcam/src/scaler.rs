@@ -22,7 +22,7 @@ pub fn pack_nv12_strided(
 ) -> Result<(), String> {
     let (w, h) = (w as usize, h as usize);
     if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 {
-        return Err(format!("pack_nv12: ungültige Dimensionen {w}x{h}"));
+        return Err(format!("pack_nv12: invalid dimensions {w}x{h}"));
     }
     fn row(
         buf: &[u8],
@@ -72,7 +72,7 @@ pub fn downscale_nv12(
 ) -> Result<(), String> {
     let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
     if dw == 0 || dh == 0 || dw > sw || dh > sh || dw % 2 != 0 || dh % 2 != 0 {
-        return Err(format!("downscale_nv12: {sw}x{sh} → {dw}x{dh} nicht unterstützt"));
+        return Err(format!("downscale_nv12: {sw}x{sh} → {dw}x{dh} unsupported"));
     }
     let need = dw * dh * 3 / 2;
     dst.clear();

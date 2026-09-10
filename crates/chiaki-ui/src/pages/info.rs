@@ -22,8 +22,8 @@ pub fn page(
     let mut children: Vec<gpui::AnyElement> = Vec::new();
     children.push(page_header(
         shell,
-        "Info & Erste Schritte",
-        Some("Alles Wichtige für den ersten Stream"),
+        "Info & getting started",
+        Some("Everything you need for your first stream"),
         window,
         cx,
     ));
@@ -45,20 +45,20 @@ pub fn page(
                             .text_size(px(theme::SIZE_HEADLINE))
                             .font_weight(FontWeight(theme::WEIGHT_HEADLINE))
                             .text_color(theme::TEXT_PRIMARY)
-                            .child("Willkommen & Portable-Modus"),
+                            .child("Welcome & portable mode"),
                     )
                     .child(
                         div()
                             .text_size(px(theme::SIZE_BODY))
                             .text_color(theme::TEXT_SECONDARY)
                             .child(
-                                "Chiaki Remaster speichert alles (Settings, Registry, Logs) \
-                                 in einem Ordner — neben der Anwendung im Portable-Modus, \
-                                 sonst im Nutzer-Verzeichnis.",
+                                "Chiaki Remaster stores everything (settings, registry, logs) \
+                                 in a single folder — next to the application in portable mode, \
+                                 otherwise in the user directory.",
                             ),
                     )
-                    .child(info_line("Modus", if portable { "Portable" } else { "Nutzer-Verzeichnis" }))
-                    .child(info_line("Daten-Ordner", &base)),
+                    .child(info_line("Mode", if portable { "Portable" } else { "User directory" }))
+                    .child(info_line("Data folder", &base)),
             )
             .child(
                 Card::new("card-psn")
@@ -68,23 +68,22 @@ pub fn page(
                             .text_size(px(theme::SIZE_HEADLINE))
                             .font_weight(FontWeight(theme::WEIGHT_HEADLINE))
                             .text_color(theme::TEXT_PRIMARY)
-                            .child("PSN verbinden"),
+                            .child("Connect PSN"),
                     )
                     .child(
                         div()
                             .text_size(px(theme::SIZE_BODY))
                             .text_color(theme::TEXT_SECONDARY)
                             .child(
-                                "Mit deinem PSN-Konto anmelden, um Remote-Play über das \
-                                 Internet zu nutzen (inkl. PSN-Account-ID für die \
-                                 Registrierung).",
+                                "Sign in with your PSN account to use remote play over the \
+                                 internet (including the PSN account ID for registration).",
                             ),
                     )
                     .child(
                         // wry/WebView2-PSN-Login (psn_login.rs): Tokens +
                         // Account-ID in den Settings speichern; Erfolg/Misserfolg
                         // kommt als Toast-UiEvent zurück.
-                        Button::new("info-psn", "PSN-Anmeldung starten")
+                        Button::new("info-psn", "Start PSN sign-in")
                             .on_click(cx.listener(|shell, _ev, _window, _cx| {
                                 crate::psn_login::start_psn_login_for_settings(
                                     shell.backend.settings().clone(),
@@ -101,19 +100,19 @@ pub fn page(
                             .text_size(px(theme::SIZE_HEADLINE))
                             .font_weight(FontWeight(theme::WEIGHT_HEADLINE))
                             .text_color(theme::TEXT_PRIMARY)
-                            .child("Konsole registrieren"),
+                            .child("Register console"),
                     )
                     .child(
                         div()
                             .text_size(px(theme::SIZE_BODY))
                             .text_color(theme::TEXT_SECONDARY)
                             .child(
-                                "Remote Play auf der Konsole aktivieren, die 8-stellige PIN \
-                                 anzeigen und den Wizard durchlaufen — fertig.",
+                                "Enable remote play on the console, show the 8-digit PIN \
+                                 and run through the wizard — done.",
                             ),
                     )
                     .child(
-                        Button::new("info-regist", "Direkt einsteigen")
+                        Button::new("info-regist", "Get started")
                             .variant(ButtonVariant::Primary)
                             .on_click(cx.listener(|shell, _ev, _window, cx| {
                                 regist_wizard::open(shell, cx);
@@ -127,19 +126,19 @@ pub fn page(
     // About-Zeile (Version + Log-Verzeichnis).
     children.push(
         Card::new("card-about")
-            .child(SectionLabel::new("Über"))
+            .child(SectionLabel::new("About"))
             .child(info_line(
                 "Version",
                 &format!("chiaki-ui {}", env!("CARGO_PKG_VERSION")),
             ))
-            .child(info_line("Log-Verzeichnis", &chiaki_settings::app_paths::log_dir().display().to_string()))
+            .child(info_line("Log directory", &chiaki_settings::app_paths::log_dir().display().to_string()))
             .child(
                 div()
                     .text_size(px(theme::SIZE_CAPTION))
                     .text_color(theme::TEXT_SECONDARY)
                     .child(
-                        "Windows-only · GPUI-Oberfläche des chiaki-ng-Ports · \
-                         AGPL-3.0 mit OpenSSL-Ausnahme",
+                        "Windows-only · GPUI frontend of the chiaki-ng port · \
+                         AGPL-3.0 with OpenSSL exception",
                     ),
             )
             .into_any_element(),

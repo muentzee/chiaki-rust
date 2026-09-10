@@ -75,7 +75,7 @@ pub(crate) fn sections(
                 _ => chiaki_settings::settings::SuspendAction::Nothing,
             });
         },
-    ), "Suspend-Hook für die Stream-Session nicht implementiert"));
+    ), "Suspend hook for the stream session not implemented"));
     behaviour.push(select_row(
         "general-audio-video",
         "Audio / Video",
@@ -112,7 +112,7 @@ pub(crate) fn sections(
     behaviour.push(toggle_row(
         "general-auto-discovery",
         "Auto discovery",
-        Some("Discover consoles on the local network while the app is running — wirksam nach App-Neustart"),
+        Some("Discover consoles on the local network while the app is running — takes effect after app restart"),
         "discovery broadcast network",
         true,
         auto_discovery,
@@ -124,7 +124,7 @@ pub(crate) fn sections(
         "remote play confirm psn",
         true,
         remote_play_ask,
-    ), "Remote-Play-Start fragt nicht nach"));
+    ), "Remote play start does not ask for confirmation"));
     behaviour.push(inactive(toggle_row(
         "general-add-steam-shortcut-ask",
         "Offer adding a Steam shortcut",
@@ -132,7 +132,7 @@ pub(crate) fn sections(
         "steam shortcut library",
         true,
         add_steam_ask,
-    ), "Steam-Shortcut-Flow ist noch nicht verdrahtet"));
+    ), "Steam shortcut flow is not wired up yet"));
 
     let mut menu = Section::new("Stream Menu");
     menu.push(inactive(toggle_row(
@@ -142,7 +142,7 @@ pub(crate) fn sections(
         "overlay menu combo",
         true,
         stream_menu,
-    ), "In-Stream-Menü nicht portiert — das HUD läuft über Tastatur/HUD-Button"));
+    ), "In-stream menu not ported — the HUD works via keyboard/HUD button"));
     for (combo, value) in menu_combos.iter().enumerate() {
         let id: &'static str = match combo {
             0 => "general-stream-menu-combo-1",
@@ -162,7 +162,7 @@ pub(crate) fn sections(
                 2 => s.set_stream_menu_shortcut3(index),
                 _ => s.set_stream_menu_shortcut4(index),
             },
-        ), "In-Stream-Menü nicht portiert"));
+        ), "In-stream menu not ported"));
     }
 
     let mut diagnostics = Section::new("Diagnostics");

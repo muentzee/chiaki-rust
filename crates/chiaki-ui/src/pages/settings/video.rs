@@ -45,11 +45,11 @@ pub(crate) fn sections(
     // wäre der Hinweis nur Lärm): Rust-Renderer rendert ohne libplacebo.
     let mut sections: Vec<Section> = Vec::new();
     if !searching {
-        let mut banner = Section::new("Hinweis (Rust-Renderer)");
+        let mut banner = Section::new("Note (Rust renderer)");
         banner.push(super::info_row(
-            "Rendering-Fine-Tuning-Parameter (libplacebo) sind im Rust-Renderer ohne Funktion \
-             und werden nur für die INI-Kompatibilität gespeichert.",
-            "rust renderer libplacebo inaktiv hinweis",
+            "Rendering fine-tuning parameters (libplacebo) have no effect in the Rust renderer \
+             and are stored only for INI compatibility.",
+            "rust renderer libplacebo inactive note",
         ));
         sections.push(banner);
     }
@@ -88,8 +88,8 @@ pub(crate) fn sections(
         "video-custom-width",
         "Custom resolution width",
         Some(
-            "Stream-Auflösung bei Window type = Custom Resolution (geklemt 640–3840, \
-             gerade Maße) — wirksam beim nächsten Session-Start",
+            "Stream resolution when window type = Custom Resolution (clamped 640–3840, \
+             even dimensions) — takes effect at the next session start",
         ),
         "width pixels",
         window_custom,
@@ -105,8 +105,8 @@ pub(crate) fn sections(
         "video-custom-height",
         "Custom resolution height",
         Some(
-            "Stream-Auflösung bei Window type = Custom Resolution (geklemt 360–2160, \
-             gerade Maße) — wirksam beim nächsten Session-Start",
+            "Stream resolution when window type = Custom Resolution (clamped 360–2160, \
+             even dimensions) — takes effect at the next session start",
         ),
         "height pixels",
         window_custom,
@@ -123,7 +123,7 @@ pub(crate) fn sections(
     window.push(toggle_row(
         "video-fullscreen-doubleclick",
         "Toggle fullscreen on double-click",
-        Some("Doppelklick in den Stream wechselt zwischen Fenster und Vollbild"),
+        Some("Double-clicking the stream toggles between windowed and fullscreen"),
         "double click fullscreen",
         true,
         s.fullscreen_double_click_enabled(),
@@ -133,7 +133,7 @@ pub(crate) fn sections(
     window.push(toggle_row(
         "video-hide-cursor",
         "Hide cursor during stream",
-        Some("Versteckt den Mauszeiger über der Video-Fläche während des Streams"),
+        Some("Hides the mouse cursor over the video area during the stream"),
         "mouse pointer",
         true,
         s.hide_cursor(),
@@ -145,8 +145,8 @@ pub(crate) fn sections(
         "video-zoom-factor",
         "Zoom factor",
         Some(
-            "Benutzerdefinierter Zoom beim Stream-Start (passend × Faktor) — \
-             linker Anschlag = Auto/aus",
+            "Custom zoom at stream start (fit × factor) — \
+             left end = Auto/off",
         ),
         "zoom scale content custom",
         true,
@@ -157,7 +157,7 @@ pub(crate) fn sections(
         if zoom_factor > 0.0 {
             format!("{} %", (zoom_factor * 100.0).round() as i64)
         } else {
-            "Auto/aus".to_string()
+            "Auto/off".to_string()
         },
         |v, s| {
             // Alles unter 1.0 gilt als Auto/aus (Key wird auf -1 gesetzt).
@@ -173,17 +173,17 @@ pub(crate) fn sections(
     // Session-Start.
     rendering.push(select_row(
         "video-output",
-        "Video-Ausgabe",
+        "Video output",
         Some(
-            "gpu = D3D11-Zero-Copy (empfohlen), cpu = Kompatibilitätspfad, \
-             auto = automatisch — wirksam beim nächsten Session-Start",
+            "gpu = D3D11-Zero-Copy (recommended), cpu = compatibility path, \
+             auto = automatic — takes effect at the next session start",
         ),
         "video output gpu cpu d3d11 zero copy sink",
         true,
         opts(&[
             ("auto", "Auto"),
             ("gpu", "GPU (D3D11-Zero-Copy)"),
-            ("cpu", "CPU (Kompatibilität)"),
+            ("cpu", "CPU (Compatibility)"),
         ]),
         &s.video_output(),
         |v, s| s.set_video_output(v),
@@ -217,7 +217,7 @@ pub(crate) fn sections(
                 s.set_decoder(if v == "pi" { Decoder::Pi } else { Decoder::Ffmpeg });
             },
         ),
-        "Pi-Decoder nicht portiert — es läuft immer FFmpeg",
+        "Pi decoder not ported — FFmpeg always runs",
     ));
     // vsync: steuert das Present-Interval des D3D11-Sink-Fensters (GPU-Pfad,
     // wirksam beim Session-Start). Aus = Present(0) ohne Sync (niedrigste
@@ -227,9 +227,9 @@ pub(crate) fn sections(
         "video-vsync",
         "Vertical sync",
         Some(
-            "An = Bildwechsel am Display-Takt (gleichmäßiger, +etwas Latenz); \
-             aus = niedrigste Latenz. Wirksam beim nächsten Session-Start \
-             (GPU-Videopfad)",
+            "On = frame swap at display cadence (smoother, +some latency); \
+             off = lowest latency. Takes effect at the next session start \
+             (GPU video path)",
         ),
         "vsync tearing fluent sync interval",
         true,
@@ -243,11 +243,11 @@ pub(crate) fn sections(
         "video-frame-pacing",
         "Frame pacing",
         Some(
-            "An = gleichmäßiger Anzeigetakt (1/FPS), glättet unregelmäßige \
-             Frame-Ankunft — kostet bis zu 1 Bild Latenz. Wirksam beim \
-             nächsten Session-Start (GPU-Videopfad)",
+            "On = even display cadence (1/FPS), smooths irregular frame arrival — \
+             costs up to 1 frame of latency. Takes effect at the next session \
+             start (GPU video path)",
         ),
-        "frame pacing smooth judder cadence takt",
+        "frame pacing smooth judder cadence timing",
         true,
         s.frame_pacing(),
     ));
@@ -268,7 +268,7 @@ pub(crate) fn sections(
                 });
             },
         ),
-        "Rendern läuft immer über GPUI (D3D11) — der Key beeinflusst nur die HDR-Codec-Wahl",
+        "Rendering always runs via GPUI (D3D11) — the key only affects the HDR codec choice",
     ));
     rendering.push(inactive(
         toggle_row(
@@ -279,7 +279,7 @@ pub(crate) fn sections(
             !backend_opengl,
             s.vulkan_deferred_swap(),
         ),
-        "Kein Vulkan-Swapchain im Rust-Renderer",
+        "No Vulkan swapchain in the Rust renderer",
     ));
     rendering.push(inactive(
         select_row(
@@ -308,7 +308,7 @@ pub(crate) fn sections(
                 });
             },
         ),
-        "libplacebo nicht portiert — steuert nur die Sichtbarkeit der Fine-Tuning-Rows",
+        "libplacebo not ported — only controls visibility of the fine-tuning rows",
     ));
     rendering.push(inactive(
         select_row(
@@ -335,7 +335,7 @@ pub(crate) fn sections(
                 });
             },
         ),
-        "libplacebo nicht portiert — nur INI-Kompatibilität",
+        "libplacebo not ported — INI compatibility only",
     ));
 
     let vsr = s.nv_vsr_enabled();
@@ -368,12 +368,12 @@ pub(crate) fn sections(
     // entspricht dem C++-Verhalten (high ab 3x Scale, sonst medium).
     vsr_section.push(select_row(
         "video-nv-vsr-quality",
-        "VSR-Qualität",
+        "VSR quality",
         Some(
-            "Qualität des VSR-Netzes — Auto = wie im C++-Client \
-             (High ab 3x Upscale, sonst Medium)",
+            "Quality of the VSR network — Auto = like the C++ client \
+             (High from 3x upscale, otherwise Medium)",
         ),
-        "vsr quality level ai netz",
+        "vsr quality level ai network",
         vsr,
         opts(&[
             ("0", "Auto"),
@@ -439,8 +439,8 @@ pub(crate) fn sections(
         "video-show-stream-stats",
         "Show stream stats during gameplay",
         Some(
-            "Master der Stats-Badges — aus blendet die komplette Badge-Reihe im Stream aus \
-             (VSR-Badge separat)",
+            "Master for the stats badges — off hides the entire badge row in the stream \
+             (VSR badge separate)",
         ),
         "hud overlay stats debug bitrate fps latency master",
         true,
@@ -449,7 +449,7 @@ pub(crate) fn sections(
     overlay.push(toggle_row(
         "video-overlay-bitrate",
         "Badge: Bitrate",
-        Some("Mbit/s-Badge in der Stats-Reihe des Stream-HUDs"),
+        Some("Mbit/s badge in the stats row of the stream HUD"),
         "hud overlay badge bitrate mbit",
         true,
         s.overlay_bitrate(),
@@ -457,7 +457,7 @@ pub(crate) fn sections(
     overlay.push(toggle_row(
         "video-overlay-rtt",
         "Badge: RTT",
-        Some("Latenz-Badge (Senkusha-RTT) in der Stats-Reihe"),
+        Some("Latency badge (Senkusha RTT) in the stats row"),
         "hud overlay badge rtt latency ping",
         true,
         s.overlay_rtt(),
@@ -465,7 +465,7 @@ pub(crate) fn sections(
     overlay.push(toggle_row(
         "video-overlay-loss",
         "Badge: Loss",
-        Some("Packet-Loss-Badge in der Stats-Reihe"),
+        Some("Packet loss badge in the stats row"),
         "hud overlay badge loss packet",
         true,
         s.overlay_loss(),
@@ -474,8 +474,8 @@ pub(crate) fn sections(
         "video-overlay-frametime",
         "Badge: Frame-Time",
         Some(
-            "Zeit pro angezeigtem Frame — GPU-Pfad: Media-Thread (Decode + VSR + \
-             Übergabe), CPU-Pfad: Presenter-Overhead (Alloc + NV12→BGRA + Wrap)",
+            "Time per displayed frame — GPU path: media thread (decode + VSR + \
+             handoff), CPU path: presenter overhead (alloc + NV12→BGRA + wrap)",
         ),
         "hud overlay badge frame time",
         true,
@@ -484,7 +484,7 @@ pub(crate) fn sections(
     overlay.push(toggle_row(
         "video-overlay-fps",
         "Badge: FPS",
-        Some("Framerate-Badge in der Stats-Reihe"),
+        Some("Framerate badge in the stats row"),
         "hud overlay badge fps framerate",
         true,
         s.overlay_fps(),
@@ -492,7 +492,7 @@ pub(crate) fn sections(
     overlay.push(toggle_row(
         "video-overlay-audio",
         "Badge: Audio",
-        Some("Audio-Puffer-Füllstand-Badge in der Stats-Reihe"),
+        Some("Audio buffer fill badge in the stats row"),
         "hud overlay badge audio buffer",
         true,
         s.overlay_audio(),
@@ -500,7 +500,7 @@ pub(crate) fn sections(
     overlay.push(toggle_row(
         "video-overlay-decoder",
         "Badge: Decoder",
-        Some("Decoder-Backend-Badge in der Stats-Reihe"),
+        Some("Decoder backend badge in the stats row"),
         "hud overlay badge decoder backend",
         true,
         s.overlay_decoder(),
@@ -508,16 +508,16 @@ pub(crate) fn sections(
     overlay.push(toggle_row(
         "video-overlay-haptics",
         "Badge: Haptics",
-        Some("Haptics-Modus-Badge in der Stats-Reihe"),
+        Some("Haptics mode badge in the stats row"),
         "hud overlay badge haptics rumble",
         true,
         s.overlay_haptics(),
     ));
     overlay.push(toggle_row(
         "video-overlay-debug",
-        "Debug-Zeile im Stream",
+        "Debug line in stream",
         Some(
-            "Monospaced Zeile unterm HUD: presented fps/drops, media ms (dec/vsr), slot-drops, \
+            "Monospaced line below the HUD: presented fps/drops, media ms (dec/vsr), slot-drops, \
              conv p95, sink gen/uploads/drops",
         ),
         "hud overlay debug line drops p95 sink slot conv",
@@ -536,7 +536,7 @@ pub(crate) fn sections(
         }
         state.virtualcam_available.unwrap_or(false)
     };
-    let mut virtualcam = Section::new("Virtuelle Kamera");
+    let mut virtualcam = Section::new("Virtual camera");
     virtualcam.push(toggle_row(
         "video-virtualcam-enabled",
         "Virtual camera feed",
@@ -613,8 +613,8 @@ pub(crate) fn sections(
         virtualcam.push(action_row(
             "video-virtualcam-headless-stop",
             "Headless feed",
-            Some("Beendet die fensterlose Session sauber (Kamera schließt sich, Konsole bleibt an)"),
-            "headless feed stop beenden",
+            Some("Cleanly stops the windowless session (the camera closes, the console stays on)"),
+            "headless feed stop quit",
             true,
             "Stop headless feed",
             false,
@@ -625,15 +625,15 @@ pub(crate) fn sections(
                 // Re-Entry, siehe HANDOFF Fix-Runde 7) und reißt die App ab.
                 if chiaki_virtualcam::request_stop() {
                     shell.push_toast(
-                        ToastData::new(ToastKind::Info, "Headless-Feed").message(
-                            "Stop-Signal gesendet — die Session wird sauber beendet",
+                        ToastData::new(ToastKind::Info, "Headless feed").message(
+                            "Stop signal sent — the session will shut down cleanly",
                         ),
                         cx,
                     );
                 } else {
                     shell.push_toast(
-                        ToastData::new(ToastKind::Warn, "Headless-Feed").message(
-                            "Läuft nicht mehr (Stop-Event nicht gefunden)",
+                        ToastData::new(ToastKind::Warn, "Headless feed").message(
+                            "Not running anymore (stop event not found)",
                         ),
                         cx,
                     );
@@ -645,11 +645,11 @@ pub(crate) fn sections(
             "video-virtualcam-headless-start",
             "Headless feed",
             Some(
-                "Startet jetzt eine separate, fensterlose Session: Stream in die virtuelle Kamera \
-                 (mit VSR, wenn aktiv), Ton bleibt lokal, dieses Fenster ist unangetastet. \
-                 Beenden über diesen Button oder Ctrl+C",
+                "Starts a separate windowless session now: stream into the virtual camera \
+                 (with VSR if active), audio stays local, this window stays untouched. \
+                 Stop via this button or Ctrl+C",
             ),
-            "headless feed start now fensterlos windowless",
+            "headless feed start now windowless",
             true,
             "Start headless feed now",
             false,
@@ -657,8 +657,8 @@ pub(crate) fn sections(
                 // shell.push_toast statt super::push_toast (Re-Entry, siehe oben).
                 match crate::backend::vcam::start_headless_now(&shell.backend) {
                     Ok(pid) => shell.push_toast(
-                        ToastData::new(ToastKind::Success, "Headless-Feed gestartet").message(
-                            format!("Fensterlose Session läuft (PID {pid}) — Kamera in OBS/Discord prüfen"),
+                        ToastData::new(ToastKind::Success, "Headless feed started").message(
+                            format!("Windowless session running (PID {pid}) — check the camera in OBS/Discord"),
                         ),
                         cx,
                     ),
@@ -671,7 +671,7 @@ pub(crate) fn sections(
         ));
     }
 
-    let ft_display_reason = "libplacebo-Display-Ziel nicht portiert — nur INI-Kompatibilität";
+    let ft_display_reason = "libplacebo display target not ported — INI compatibility only";
     let mut display = Section::new("Display");
     display.push(inactive(
         select_row(
@@ -939,7 +939,7 @@ mod ft {
     use super::Settings;
     use crate::pages::settings::{inactive, select_row, slider_row, toggle_row_with, SRow};
 
-    const FT_REASON: &str = "libplacebo nicht portiert — nur INI-Kompatibilität";
+    const FT_REASON: &str = "libplacebo not ported — INI compatibility only";
 
     pub(super) fn bool_row(
         id: &'static str,

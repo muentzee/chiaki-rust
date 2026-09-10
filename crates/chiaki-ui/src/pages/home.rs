@@ -109,13 +109,13 @@ pub(crate) fn console_entries(shell: &AppShell) -> Vec<ConsoleEntry> {
             continue;
         }
         let (status, status_label) = match host.state {
-            chiaki_core::discovery::DiscoveryHostState::Ready => (StatusKind::Ready, "Bereit"),
+            chiaki_core::discovery::DiscoveryHostState::Ready => (StatusKind::Ready, "Ready"),
             chiaki_core::discovery::DiscoveryHostState::Standby => (StatusKind::Standby, "Standby"),
             chiaki_core::discovery::DiscoveryHostState::Unknown => {
                 if registered.is_some() {
-                    (StatusKind::Offline, "Offline")
+                    (StatusKind::Offline, "offline")
                 } else {
-                    (StatusKind::Unregistered, "Nicht registriert")
+                    (StatusKind::Unregistered, "Not registered")
                 }
             }
         };
@@ -151,9 +151,9 @@ pub(crate) fn console_entries(shell: &AppShell) -> Vec<ConsoleEntry> {
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| manual.host.clone());
         let (status, status_label) = if registered.is_some() {
-            (StatusKind::Offline, "Offline")
+            (StatusKind::Offline, "offline")
         } else {
-            (StatusKind::Unregistered, "Nicht registriert")
+            (StatusKind::Unregistered, "Not registered")
         };
         out.push(ConsoleEntry {
             name,
@@ -179,9 +179,9 @@ pub(crate) fn console_entries(shell: &AppShell) -> Vec<ConsoleEntry> {
             continue;
         }
         let (status, status_label) = if device.remoteplay_enabled {
-            (StatusKind::Ready, "Bereit")
+            (StatusKind::Ready, "Ready")
         } else {
-            (StatusKind::Offline, "Remote Play aus")
+            (StatusKind::Offline, "Remote Play off")
         };
         out.push(ConsoleEntry {
             name: device.nickname,
@@ -216,13 +216,13 @@ fn toast(kind: ToastKind, title: &str, message: impl Into<gpui::SharedString>) -
 pub(crate) fn wake_entry(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut Context<AppShell>) {
     let Some(registered) = entry.registered.as_ref() else {
         shell.push_toast(
-            toast(ToastKind::Warn, "Nicht registriert", "Nur registrierte Konsolen können aufgeweckt werden."),
+            toast(ToastKind::Warn, "Not registered", "Only registered consoles can be woken up."),
             cx,
         );
         return;
     };
     if entry.addr.is_empty() {
-        shell.push_toast(toast(ToastKind::Warn, "Keine Adresse", "Für diese Konsole ist keine IP bekannt."), cx);
+        shell.push_toast(toast(ToastKind::Warn, "No address", "No IP address is known for this console."), cx);
         return;
     }
     match shell
@@ -233,13 +233,13 @@ pub(crate) fn wake_entry(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut Co
         Ok(()) => shell.push_toast(
             toast(
                 ToastKind::Success,
-                "Aufwachen gesendet",
-                format!("„{}“ wird geweckt — der Start dauert einen Moment.", entry.name),
+                "Wake sent",
+                format!("Waking up \"{}\" — startup takes a moment.", entry.name),
             ),
             cx,
         ),
         Err(err) => shell.push_toast(
-            toast(ToastKind::Danger, "Aufwachen fehlgeschlagen", err.to_string()),
+            toast(ToastKind::Danger, "Wake failed", err.to_string()),
             cx,
         ),
     }
@@ -256,7 +256,7 @@ pub(crate) fn connect_entry(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut
     if entry.psn {
         let Some(duid) = entry.duid.clone() else {
             shell.push_toast(
-                toast(ToastKind::Warn, "Keine PSN-Konsole", "Dieser Eintrag hat keine DUID."),
+                toast(ToastKind::Warn, "Not a PSN console", "This entry has no DUID."),
                 cx,
             );
             return;
@@ -286,9 +286,9 @@ pub(crate) fn connect_entry(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut
                 shell.push_toast(
                     toast(
                         ToastKind::Info,
-                        "PSN-Verbindung …",
+                        "PSN connection …",
                         format!(
-                            "\u{201e}{}\u{201c} ({}) wird über PSN verbunden …",
+                            "\"{}\" ({}) is connecting via PSN …",
                             entry.name,
                             if entry.ps5 { "PS5" } else { "PS4" }
                         ),
@@ -300,7 +300,7 @@ pub(crate) fn connect_entry(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut
             Err(err) => {
                 // Erwarteter Smoke-Fall: keine PSN-Anmeldung/Account-ID —
                 // saubere Meldung, kein Navigate, kein Session-Start.
-                shell.push_toast(toast(ToastKind::Warn, "PSN-Verbindung nicht möglich", err), cx);
+                shell.push_toast(toast(ToastKind::Warn, "PSN connection not possible", err), cx);
             }
         }
         return;
@@ -309,8 +309,8 @@ pub(crate) fn connect_entry(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut
         shell.push_toast(
             toast(
                 ToastKind::Warn,
-                "Nicht registriert",
-                "Diese Konsole ist nicht registriert — starte den Registrierungs-Wizard.",
+                "Not registered",
+                "This console is not registered — start the registration wizard.",
             ),
             cx,
         );
@@ -318,7 +318,7 @@ pub(crate) fn connect_entry(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut
     }
     if entry.addr.is_empty() {
         shell.push_toast(
-            toast(ToastKind::Warn, "Keine Adresse", "Für diese Konsole ist keine IP bekannt."),
+            toast(ToastKind::Warn, "No address", "No IP address is known for this console."),
             cx,
         );
         return;
@@ -360,14 +360,14 @@ fn connect_normal(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut Context<A
         (_, _, Some(duid)) => HostId::Psn { duid: duid.clone() },
         _ => {
             shell.push_toast(
-                toast(ToastKind::Warn, "Nicht verbunden", "Konsole ist nicht registriert."),
+                toast(ToastKind::Warn, "Not connected", "Console is not registered."),
                 cx,
             );
             return;
         }
     };
     shell.push_toast(
-        toast(ToastKind::Info, "Verbinde …", format!("\u{201e}{}\u{201c} ({})", entry.name, entry.addr)),
+        toast(ToastKind::Info, "Connecting …", format!("\"{}\" ({})", entry.name, entry.addr)),
         cx,
     );
     shell.navigate(Route::Stream(host_id), cx);
@@ -382,18 +382,18 @@ fn open_vcam_choice(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut Context
     let running = chiaki_virtualcam::is_running();
     let body = if running {
         format!(
-            "Der fensterlose Kamera-Feed läuft bereits. „{}“ zusätzlich normal streamen oder den Feed stoppen?",
+            "The windowless camera feed is already running. Stream \"{}\" normally as well, or stop the feed?",
             entry.name
         )
     } else {
         format!(
-            "Wie soll „{}“ gestartet werden? Der fensterlose Feed spielt in die virtuelle Kamera (mit VSR, wenn aktiv) und der Ton bleibt lokal — ohne sichtbares Chiaki-Fenster.",
+            "How should \"{}\" be started? The windowless feed plays into the virtual camera (with VSR, if enabled) and audio stays local — without a visible Chiaki window.",
             entry.name
         )
     };
     let entry_normal = entry.clone();
-    let mut dialog = Dialog::new("vcam-choice", "Virtuelle Kamera", body).button(
-        DialogButton::new("Normal streamen", ButtonVariant::Primary).action(move |_window, cx| {
+    let mut dialog = Dialog::new("vcam-choice", "Virtual camera", body).button(
+        DialogButton::new("Stream normally", ButtonVariant::Primary).action(move |_window, cx| {
             let _ = weak.update(cx, |shell, cx| connect_normal(shell, &entry_normal, cx));
         }),
     );
@@ -401,25 +401,25 @@ fn open_vcam_choice(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut Context
     let entry_start = entry.clone();
     if running {
         dialog = dialog.button(
-            DialogButton::new("Headless-Feed stoppen", ButtonVariant::Danger).action(
+            DialogButton::new("Stop headless feed", ButtonVariant::Danger).action(
                 move |_window, cx| {
                     let _ = weak_stop.update(cx, |shell, cx| {
                         if crate::backend::vcam::stop_headless() {
                             shell.push_toast(
                                 crate::components::ToastData::new(
                                     crate::components::ToastKind::Info,
-                                    "Headless-Feed",
+                                    "Headless feed",
                                 )
-                                .message("Stop-Signal gesendet — die Session wird sauber beendet"),
+                                .message("Stop signal sent — the session will shut down cleanly"),
                                 cx,
                             );
                         } else {
                             shell.push_toast(
                                 crate::components::ToastData::new(
                                     crate::components::ToastKind::Warn,
-                                    "Headless-Feed",
+                                    "Headless feed",
                                 )
-                                .message("Läuft nicht mehr"),
+                                .message("No longer running"),
                                 cx,
                             );
                         }
@@ -429,7 +429,7 @@ fn open_vcam_choice(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut Context
         );
     } else {
         dialog = dialog.button(
-            DialogButton::new("Headless starten", ButtonVariant::Ghost).action(
+            DialogButton::new("Start headless", ButtonVariant::Ghost).action(
                 move |_window, cx| {
                     let _ = weak_stop.update(cx, |shell, cx| {
                         match crate::backend::vcam::start_headless_now_with_addr(
@@ -439,17 +439,17 @@ fn open_vcam_choice(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut Context
                             Ok(pid) => shell.push_toast(
                                 crate::components::ToastData::new(
                                     crate::components::ToastKind::Success,
-                                    "Headless-Feed gestartet",
+                                    "Headless feed started",
                                 )
                                 .message(format!(
-                                    "Fensterlose Session läuft (PID {pid}) — Kamera in OBS/Discord prüfen"
+                                    "Windowless session running (PID {pid}) — check the camera in OBS/Discord"
                                 )),
                                 cx,
                             ),
                             Err(err) => shell.push_toast(
                                 crate::components::ToastData::new(
                                     crate::components::ToastKind::Warn,
-                                    "Headless-Feed",
+                                    "Headless feed",
                                 )
                                 .message(err),
                                 cx,
@@ -460,7 +460,7 @@ fn open_vcam_choice(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut Context
             ),
         );
     }
-    let dialog = dialog.button(DialogButton::new("Abbrechen", ButtonVariant::Ghost));
+    let dialog = dialog.button(DialogButton::new("Cancel", ButtonVariant::Ghost));
     shell.push_dialog(dialog, cx);
 }
 
@@ -471,8 +471,8 @@ pub(crate) fn open_host_menu(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mu
     let weak = cx.entity().downgrade();
 
     let connect_entry_clone = entry.clone();
-    let mut dialog = Dialog::new("host-menu", entry.name.clone(), "Aktion auswählen").button(
-        DialogButton::new("Verbinden", ButtonVariant::Ghost).action(move |_window, cx| {
+    let mut dialog = Dialog::new("host-menu", entry.name.clone(), "Choose an action").button(
+        DialogButton::new("Connect", ButtonVariant::Ghost).action(move |_window, cx| {
             let _ = weak.update(cx, |shell, cx| connect_entry(shell, &connect_entry_clone, cx));
         }),
     );
@@ -481,7 +481,7 @@ pub(crate) fn open_host_menu(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mu
         let weak = cx.entity().downgrade();
         let wake_entry_clone = entry.clone();
         dialog = dialog.button(
-            DialogButton::new("Aufwecken", ButtonVariant::Ghost).action(move |_window, cx| {
+            DialogButton::new("Wake", ButtonVariant::Ghost).action(move |_window, cx| {
                 let _ = weak.update(cx, |shell, cx| wake_entry(shell, &wake_entry_clone, cx));
             }),
         );
@@ -495,7 +495,7 @@ pub(crate) fn open_host_menu(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mu
             let weak = cx.entity().downgrade();
             let name = entry.name.clone();
             dialog = dialog.button(
-                DialogButton::new("Verstecken", ButtonVariant::Ghost).action(move |_window, cx| {
+                DialogButton::new("Hide", ButtonVariant::Ghost).action(move |_window, cx| {
                     let _ = weak.update(cx, |shell, cx| {
                         shell
                             .backend
@@ -508,7 +508,7 @@ pub(crate) fn open_host_menu(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mu
                             )))
                             .ok();
                         shell.push_toast(
-                            toast(ToastKind::Info, "Konsole versteckt", name.clone()),
+                            toast(ToastKind::Info, "Console hidden", name.clone()),
                             cx,
                         );
                     });
@@ -521,7 +521,7 @@ pub(crate) fn open_host_menu(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mu
         let weak = cx.entity().downgrade();
         let delete_entry = entry.clone();
         dialog = dialog.button(
-            DialogButton::new("Registrierung löschen …", ButtonVariant::Danger).action(
+            DialogButton::new("Delete registration …", ButtonVariant::Danger).action(
                 move |_window, cx| {
                     let _ = weak.update(cx, |shell, cx| {
                         open_delete_confirm(shell, &delete_entry, cx)
@@ -531,7 +531,7 @@ pub(crate) fn open_host_menu(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mu
         );
     }
 
-    dialog = dialog.button(DialogButton::new("Abbrechen", ButtonVariant::Ghost));
+    dialog = dialog.button(DialogButton::new("Cancel", ButtonVariant::Ghost));
     shell.push_dialog(dialog, cx);
 }
 
@@ -543,12 +543,12 @@ fn open_delete_confirm(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut Cont
     let mac = entry.mac;
     let dialog = Dialog::new(
         "delete-confirm",
-        "Konsole löschen",
-        format!("Registrierung von „{name}“ wirklich löschen?"),
+        "Delete console",
+        format!("Really delete the registration of \"{name}\"?"),
     )
-    .button(DialogButton::new("Abbrechen", ButtonVariant::Ghost))
+    .button(DialogButton::new("Cancel", ButtonVariant::Ghost))
     .button(
-        DialogButton::new("Löschen", ButtonVariant::Danger).action(move |_window, cx| {
+        DialogButton::new("Delete", ButtonVariant::Danger).action(move |_window, cx| {
             let _ = weak.update(cx, |shell, cx| {
                 if let Some(mac) = mac {
                     shell
@@ -560,7 +560,7 @@ fn open_delete_confirm(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut Cont
                         .ok();
                 }
                 shell.push_toast(
-                    toast(ToastKind::Success, "Registrierung gelöscht", name.clone()),
+                    toast(ToastKind::Success, "Registration deleted", name.clone()),
                     cx,
                 );
             });
@@ -674,7 +674,7 @@ pub fn page(
     let ui_focus = shell.regist_wizard.sync_ui_focus(4, cx);
 
     let mut children: Vec<gpui::AnyElement> = Vec::new();
-    children.push(page_header(shell, "Home", Some("Willkommen zurück"), window, cx));
+    children.push(page_header(shell, "Home", Some("Welcome back"), window, cx));
 
     if entries.is_empty() {
         // Leerzustand (Erststart): Willkommens-Fluss statt leerer Liste.
@@ -684,12 +684,12 @@ pub fn page(
                 .child(
                     EmptyState::new(
                         icons::paths::CONSOLE,
-                        "Willkommen beim Chiaki Remaster",
-                        "Registriere deine erste Konsole, um zu streamen.\n\
-                         Konsole und dieser Rechner müssen im selben Netzwerk sein.",
+                        "Welcome to Chiaki Remaster",
+                        "Register your first console to start streaming.\n\
+                         The console and this computer must be on the same network.",
                     )
                     .action(
-                        Button::new("home-welcome-regist", "Konsole registrieren")
+                        Button::new("home-welcome-regist", "Register console")
                             .variant(ButtonVariant::Primary)
                             .on_click(cx.listener(|shell, _ev, _window, cx| {
                                 // Wizard ist Overlay der Konsolen-Seite
@@ -713,7 +713,7 @@ pub fn page(
         }
 
         // Reihe „Deine Konsolen“.
-        children.push(SectionLabel::new("Deine Konsolen").into_any_element());
+        children.push(SectionLabel::new("Your consoles").into_any_element());
         children.push(
             div()
                 .flex()
@@ -727,7 +727,7 @@ pub fn page(
         );
 
         // Schnellaktionen (schmale Zeile, Spec §2.1).
-        children.push(SectionLabel::new("Schnellaktionen").into_any_element());
+        children.push(SectionLabel::new("Quick actions").into_any_element());
         children.push(
             div()
                 .flex()
@@ -735,7 +735,7 @@ pub fn page(
                 .flex_wrap()
                 .gap_2()
                 .child(
-                    Button::new("qa-psn", "PSN Remote aktivieren")
+                    Button::new("qa-psn", "Set up PSN Remote Play")
                         .focus_handle(ui_focus[1].clone())
                         .on_click(cx.listener(|shell, _ev, _window, _cx| {
                             // Gleicher PSN-Login-Flow wie Settings/Info
@@ -748,7 +748,7 @@ pub fn page(
                         })),
                 )
                 .child(
-                    Button::new("qa-regist", "Konsole registrieren")
+                    Button::new("qa-regist", "Register console")
                         .focus_handle(ui_focus[2].clone())
                         .on_click(cx.listener(|shell, _ev, _window, cx| {
                             // Wizard ist Overlay der Konsolen-Seite.
@@ -757,7 +757,7 @@ pub fn page(
                         })),
                 )
                 .child(
-                    Button::new("qa-manual", "Manuellen Host hinzufügen")
+                    Button::new("qa-manual", "Add manual host")
                         .focus_handle(ui_focus[3].clone())
                         .on_click(cx.listener(|shell, _ev, _window, cx| {
                             shell.regist_wizard.manual_focus_pending = true;
@@ -779,7 +779,7 @@ pub fn page(
                 div()
                     .text_size(px(theme::SIZE_CAPTION))
                     .text_color(theme::TEXT_DISABLED)
-                    .child("Enter — Verbinden · Rechtsklick — Konsolen-Aktionen"),
+                    .child("Enter — Connect · Right-click — Console actions"),
             )
             .into_any_element(),
     );
@@ -860,7 +860,7 @@ fn hero_card(
                         ),
                 )
                 .child(
-                    Button::new("hero-connect", "Verbinden")
+                    Button::new("hero-connect", "Connect")
                         .variant(ButtonVariant::Primary)
                         .focus_handle(focus)
                         .on_click(cx.listener(move |shell, _ev, _window, cx| {

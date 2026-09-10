@@ -136,7 +136,7 @@ pub(crate) fn sections(
         "speex noise echo cancel",
         true,
         speech,
-    ), "Speex-DSP nicht portiert"));
+    ), "Speex DSP not ported"));
     audio.push(inactive(slider_row(
         "audio-noise-suppress",
         "Noise to suppress",
@@ -149,7 +149,7 @@ pub(crate) fn sections(
         1.0,
         format!("{noise} dB (default 6 dB)"),
         |v, s| s.set_noise_suppress_level(v.round() as i64),
-    ), "Speex-DSP nicht portiert"));
+    ), "Speex DSP not ported"));
     audio.push(inactive(slider_row(
         "audio-echo-suppress",
         "Echo to suppress",
@@ -162,7 +162,7 @@ pub(crate) fn sections(
         1.0,
         format!("{echo} dB (default 30 dB)"),
         |v, s| s.set_echo_suppress_level(v.round() as i64),
-    ), "Speex-DSP nicht portiert"));
+    ), "Speex DSP not ported"));
 
     let mut network = Section::new("Network & Latency");
     // wifi_dropped_notif_percent: Frame-Verlust im 5-Sekunden-Fenster >

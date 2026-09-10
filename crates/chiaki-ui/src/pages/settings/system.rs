@@ -175,7 +175,7 @@ pub(crate) fn sections(
         "sanitize privacy logs",
         true,
         sanitize,
-    ), "Log-Sanitizer ist nicht implementiert"));
+    ), "Log sanitizer is not implemented"));
     // log_verbose: wird beim nächsten App-Start als tracing-EnvFilter-Default
     // gelesen (debug statt info); RUST_LOG überschreibt weiterhin.
     logging.push(toggle_row(
@@ -183,7 +183,7 @@ pub(crate) fn sections(
         "Verbose logging",
         Some(
             "Debug-level logs \u{2014} only for diagnostics, grows quickly. \
-             Wirksam nach App-Neustart (RUST_LOG überschreibt weiterhin)",
+             Takes effect after an app restart (RUST_LOG still overrides)",
         ),
         "verbose debug logs",
         true,
@@ -225,15 +225,15 @@ pub(crate) fn sections(
             match result {
                 Ok(action) => {
                     let text = match action {
-                        chiaki_steam::SteamShortcutAction::Added => "Shortcut erstellt",
-                        chiaki_steam::SteamShortcutAction::Updated => "Shortcut aktualisiert",
+                        chiaki_steam::SteamShortcutAction::Added => "Shortcut created",
+                        chiaki_steam::SteamShortcutAction::Updated => "Shortcut updated",
                     };
                     shell.push_toast(
                         crate::components::ToastData::new(
                             crate::components::ToastKind::Success,
                             "Add to Steam library",
                         )
-                        .message(format!("{text} — Steam neu starten, damit er erscheint")),
+                        .message(format!("{text} — restart Steam for it to appear")),
                         cx,
                     );
                 }

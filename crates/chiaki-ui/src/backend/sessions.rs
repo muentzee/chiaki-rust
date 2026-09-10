@@ -148,7 +148,8 @@ pub struct StreamTelemetry {
     /// kommt als direkter Poll aus `Session::rtt_us()` (Senkusha-RTT,
     /// StreamUiState::update_stats) und umgeht dieses Feld.
     pub rtt_ms_x10: AtomicU32,
-    /// Haptics-Modus ("DualSense-Haptics" | "Rumble-Fallback" | "aus").
+    /// Haptics-Modus ("DualSense haptics" | "Rumble fallback" | "off") —
+    /// Werte sind UI-sichtbar (HUD-Badge), daher Englisch.
     pub haptics_mode: Mutex<String>,
     /// Media-Thread: EMA der Wall-Clock-Zeit je ANGEZEIGTEM Frame (decode
     /// aller queued Samples + VSR + Interop/Copy/Upload, µs) — Quelle der
@@ -858,7 +859,7 @@ impl SessionManager {
                         session_id: 0,
                         event: SessionEvent::Quit {
                             reason: chiaki_core::session::QuitReason::SessionRequestConnectionRefused,
-                            reason_str: format!("Verbindung fehlgeschlagen: {err}"),
+                            reason_str: format!("Connection failed: {err}"),
                         },
                     });
                 }
@@ -910,11 +911,11 @@ impl SessionManager {
                 );
                 media.nv_vsr = false;
                 self.events.send(UiEvent::Toast(
-                    ToastData::new(ToastKind::Warn, "VSR nicht verfügbar").message(if cuda {
-                        "VFX-SDK nicht gefunden (Settings → Video). Die Session läuft ohne Upscaling."
-                    } else {
-                        "Kein NVIDIA-Treiber (nvcuda.dll) — VSR braucht eine GeForce-RTX-GPU. Die Session läuft ohne Upscaling."
-                    }),
+                ToastData::new(ToastKind::Warn, "VSR unavailable").message(if cuda {
+                    "VFX SDK not found (Settings → Video). The session runs without upscaling."
+                } else {
+                    "No NVIDIA driver (nvcuda.dll) — VSR needs a GeForce RTX GPU. The session runs without upscaling."
+                }),
                 ));
             }
         }
@@ -1003,7 +1004,7 @@ impl SessionManager {
                 Err(err) => {
                     tracing::error!("Virtuelle Kamera nicht verfügbar: {err}");
                     self.events.send(UiEvent::Toast(
-                        ToastData::new(ToastKind::Warn, "Virtuelle Kamera aus").message(err),
+                        ToastData::new(ToastKind::Warn, "Virtual camera unavailable").message(err),
                     ));
                     None
                 }
@@ -1097,7 +1098,7 @@ impl SessionManager {
                 }
                 // Media-Kanal schließen → Media-Thread räumt Audio/Haptics ab.
                 *lock(shared_for_thread.media_tx.lock()) = None;
-                *lock(telemetry_for_thread.haptics_mode.lock()) = "aus".into();
+                *lock(telemetry_for_thread.haptics_mode.lock()) = "off".into();
                 // GPU-Sink zuletzt (Stop-Nachricht + Join des Render-Threads).
                 drop(gpu_sink_for_stop);
                 tracing::info!("Session #{session_id} beendet");
@@ -1488,12 +1489,12 @@ impl SessionManager {
                                 Ok(()) => {
                                     cb_handle.push_line(
                                         &cb_events,
-                                        format!("Konsole registriert: {nickname}"),
+                                        format!("Console registered: {nickname}"),
                                     );
                                     // Backend-getriebener Toast (sichtbar, auch
                                     // wenn der User den Wizard verlassen hat).
                                     cb_events.send(UiEvent::Toast(
-                                        ToastData::new(ToastKind::Success, "Konsole registriert")
+                                        ToastData::new(ToastKind::Success, "Console registered")
                                             .message(nickname.clone()),
                                     ));
                                     cb_handle.finish(&cb_events, Ok(nickname));
@@ -1501,7 +1502,7 @@ impl SessionManager {
                                 Err(err) => {
                                     cb_handle.finish(
                                         &cb_events,
-                                        Err(format!("Konnte Settings nicht speichern: {err}")),
+                                        Err(format!("Could not save settings: {err}")),
                                     );
                                 }
                             }
@@ -1521,7 +1522,7 @@ impl SessionManager {
                     Err(err) => {
                         handle.finish(
                             &events,
-                            Err(format!("Registrierung konnte nicht gestartet werden: {err}")),
+                            Err(format!("Could not start registration: {err}")),
                         );
                     }
                 }
@@ -1865,7 +1866,7 @@ struct MediaTimings {
                                     .haptics_mode
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner()) =
-                                    "DualSense-Haptics".into();
+                                    "DualSense haptics".into();
                                 haptics = Some(player);
                             }
                             Err(_) => {
@@ -1877,7 +1878,7 @@ struct MediaTimings {
                                     .haptics_mode
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner()) =
-                                    if fallback { "Rumble-Fallback" } else { "aus" }.into();
+                                    if fallback { "Rumble fallback" } else { "off" }.into();
                             }
                         }
                     }

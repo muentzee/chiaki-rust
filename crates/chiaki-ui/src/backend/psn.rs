@@ -64,9 +64,9 @@ impl PsnDeviceInfo {
     /// Status-Label für die Kachel.
     pub fn state(&self) -> &'static str {
         if self.remoteplay_enabled {
-            "Bereit"
+            "Ready"
         } else {
-            "Remote Play aus"
+            "Remote Play off"
         }
     }
 }
@@ -215,11 +215,11 @@ impl PsnHandle {
                         events.send(UiEvent::Toast(
                             crate::components::ToastData::new(
                                 crate::components::ToastKind::Warn,
-                                "PSN-Anmeldung abgelaufen",
+                                "PSN sign-in expired",
                             )
                             .message(format!(
-                                "Token-Refresh fehlgeschlagen ({err}) — bitte in den \
-                                 Einstellungen neu anmelden."
+                                "Token refresh failed ({err}) — please sign in again in \
+                                 Settings."
                             )),
                         ));
                     }
@@ -252,9 +252,9 @@ impl PsnHandle {
                 events.send(UiEvent::Toast(
                     crate::components::ToastData::new(
                         crate::components::ToastKind::Warn,
-                        "Nicht bei PSN angemeldet",
+                        "Not signed in to PSN",
                     )
-                    .message("Bitte zuerst in den Einstellungen \u{201e}PSN\u{201c} verbinden."),
+                    .message("Connect your PSN account in Settings first."),
                 ));
             }
             return;
@@ -278,12 +278,12 @@ impl PsnHandle {
                                 );
                                 this.updating.store(false, Ordering::Relaxed);
                                 events.send(UiEvent::Psn(super::psn::PsnUiEvent::DevicesFailed(
-                                    format!("PSN-Geräteliste fehlgeschlagen: {first_err}"),
+                                    format!("PSN device list failed: {first_err}"),
                                 )));
                                 events.send(UiEvent::Toast(
                                     crate::components::ToastData::new(
                                         crate::components::ToastKind::Danger,
-                                        "PSN-Geräteliste fehlgeschlagen",
+                                        "PSN device list failed",
                                     )
                                     .message(first_err.to_string()),
                                 ));
@@ -351,7 +351,7 @@ pub fn build_psn_connect_request(
 
     // C++ InitiatePsnConnection: chiaki_holepunch_session_init + Port-Guessing.
     let holepunch = HolepunchSession::new(&token)
-        .map_err(|e| format!("PSN-Holepunch-Session konnte nicht initialisiert werden: {e}"))?;
+        .map_err(|e| format!("Failed to initialize PSN holepunch session: {e}"))?;
     holepunch.force_port_guessing(settings.port_guessing_enabled());
     holepunch.set_port_guessing_ports(settings.port_guess_count() as i32);
     holepunch.set_port_guessing_socks(settings.port_guess_socket_count() as i32);
@@ -575,7 +575,7 @@ mod tests {
         assert_eq!(mapped[0].duid, PS4_PLACEHOLDER_DUID);
         assert!(mapped[0].ps5);
         assert_eq!(mapped[0].console_type(), ConsoleType::Ps5);
-        assert_eq!(mapped[0].state(), "Bereit");
+        assert_eq!(mapped[0].state(), "Ready");
     }
 
     #[test]

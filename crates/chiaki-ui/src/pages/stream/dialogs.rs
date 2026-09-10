@@ -41,11 +41,11 @@ pub(crate) fn push_disconnect_confirm(shell: &mut AppShell, cx: &mut Context<App
 
     let dialog = Dialog::new(
         "stream-disconnect",
-        "Stream beenden?",
-        "Die Verbindung zur Konsole wird getrennt.",
+        "End streaming?",
+        "The connection to the console will be disconnected.",
     )
     .button(
-        DialogButton::new("Trennen", ButtonVariant::Danger).action(move |_window, cx: &mut App| {
+        DialogButton::new("Disconnect", ButtonVariant::Danger).action(move |_window, cx: &mut App| {
             let _ = shell_quit.update(cx, |shell, cx| {
                 if cx.has_global::<StreamUiState>() {
                     let state = cx.global_mut::<StreamUiState>();
@@ -59,7 +59,7 @@ pub(crate) fn push_disconnect_confirm(shell: &mut AppShell, cx: &mut Context<App
         }),
     )
     .button(
-        DialogButton::new("Ruhemodus", ButtonVariant::Primary).action(move |_window, cx: &mut App| {
+        DialogButton::new("Rest mode", ButtonVariant::Primary).action(move |_window, cx: &mut App| {
             // Konsole in den Ruhemodus fahren (C++: chiaki_session_goto_bed);
             // das Quit-Event (RemoteShutdown) bringt die UI zurück nach Home.
             // auto_bed_sent markieren — der Quit-Handler (disconnect_action
@@ -71,7 +71,7 @@ pub(crate) fn push_disconnect_confirm(shell: &mut AppShell, cx: &mut Context<App
             }
         }),
     )
-    .button(DialogButton::new("Abbrechen", ButtonVariant::Ghost));
+    .button(DialogButton::new("Cancel", ButtonVariant::Ghost));
 
     shell.push_dialog(dialog, cx);
 }
@@ -125,15 +125,15 @@ pub fn pin_view(snap: &super::state::StreamSnapshot) -> gpui::AnyElement {
                         .text_size(px(theme::SIZE_TITLE))
                         .font_weight(gpui::FontWeight(theme::WEIGHT_TITLE))
                         .text_color(theme::TEXT_PRIMARY)
-                        .child("Login-PIN eingeben"),
+                        .child("Enter login PIN"),
                 )
                 .child(
                     div()
                         .text_size(px(theme::SIZE_BODY))
                         .text_color(theme::TEXT_SECONDARY)
                         .child(
-                            "Gib die 8-stellige PIN ein, die auf der Konsole angezeigt wird \
-                             (Ziffern tippen, automatisch übernehmen).",
+                            "Enter the 8-digit PIN shown on the console \
+                             (type the digits, it is submitted automatically).",
                         ),
                 )
                 .child(div().flex().gap_2().children(boxes))
@@ -146,9 +146,9 @@ pub fn pin_view(snap: &super::state::StreamSnapshot) -> gpui::AnyElement {
                             theme::TEXT_DISABLED
                         })
                         .child(if snap.pin_incorrect {
-                            "PIN war falsch — bitte erneut eingeben (Esc = Abbrechen)".to_string()
+                            "Incorrect PIN — please enter it again (Esc = cancel)".to_string()
                         } else {
-                            "Esc = Abbrechen".to_string()
+                            "Esc = cancel".to_string()
                         }),
                 ),
         )
@@ -182,13 +182,13 @@ pub fn keyboard_view(
                         .text_size(px(theme::SIZE_TITLE))
                         .font_weight(gpui::FontWeight(theme::WEIGHT_TITLE))
                         .text_color(theme::TEXT_PRIMARY)
-                        .child("Tastatur der Konsole"),
+                        .child("Console keyboard"),
                 )
                 .child(
                     div()
                         .text_size(px(theme::SIZE_BODY))
                         .text_color(theme::TEXT_SECONDARY)
-                        .child("Text eingeben und an die Konsole senden."),
+                        .child("Enter text and send it to the console."),
                 )
                 .child(
                     TextField::new("console-keyboard")
@@ -209,12 +209,12 @@ pub fn keyboard_view(
                         .gap_2()
                         .justify_end()
                         .child(
-                            Button::new("keyboard-cancel", "Abbrechen")
+                            Button::new("keyboard-cancel", "Cancel")
                                 .variant(ButtonVariant::Ghost)
                                 .on_click(cancel),
                         )
                         .child(
-                            Button::new("keyboard-send", "Senden")
+                            Button::new("keyboard-send", "Send")
                                 .variant(ButtonVariant::Primary)
                                 .on_click(send),
                         ),

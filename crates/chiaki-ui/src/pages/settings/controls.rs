@@ -55,7 +55,7 @@ pub(crate) fn sections(
         "mouse touchpad pointer",
         true,
         mouse_touch,
-    ), "Maus-als-Touchpad im Rust-Client nicht portiert"));
+    ), "Mouse-as-touchpad not ported in the Rust client"));
     keyboard_section.push(action_row(
         "controls-reset-keys",
         "Reset all keys",
@@ -103,10 +103,10 @@ pub(crate) fn sections(
                 cx,
                 crate::components::ToastKind::Info,
                 "Controller mapping",
-                "Wird mit dem Controller-Agenten verdrahtet (Backend-Flow fehlt noch).",
+                "Will be wired up with the controller agent (backend flow still missing).",
             );
         },
-    ), "Capture-Flow folgt mit dem Controller-Agenten"));
+    ), "Capture flow follows with the controller agent"));
     controller.push(inactive(action_row(
         "controls-reset-mapping",
         "Reset controller mapping",
@@ -121,10 +121,10 @@ pub(crate) fn sections(
                 cx,
                 crate::components::ToastKind::Info,
                 "Controller mapping",
-                "Wird mit dem Controller-Agenten verdrahtet (Backend-Flow fehlt noch).",
+                "Will be wired up with the controller agent (backend flow still missing).",
             );
         },
-    ), "Capture-Flow folgt mit dem Controller-Agenten"));
+    ), "Capture flow follows with the controller agent"));
     controller.push(inactive(toggle_row(
         "controls-background-events",
         "Background controller events",
@@ -132,7 +132,7 @@ pub(crate) fn sections(
         "background controller input",
         true,
         background_events,
-    ), "SDL-Hint wird im Rust-Input-Backend nicht gesetzt"));
+    ), "SDL hint is not set in the Rust input backend"));
     controller.push(inactive(toggle_row(
         "controls-buttons-by-pos",
         "Buttons by position",
@@ -140,15 +140,15 @@ pub(crate) fn sections(
         "nintendo layout abxy",
         true,
         buttons_by_pos,
-    ), "Positions-basiertes Button-Mapping im Input-Backend nicht umgesetzt"));
+    ), "Position-based button mapping not implemented in the input backend"));
     // Stick-Deadzone: wird live im Stream-Input-Loop auf den kombinierten
     // Controller-State angewendet (Rescale oberhalb der Zone; 0 = aus).
     controller.push(slider_row(
         "controls-stick-deadzone",
         "Stick deadzone",
         Some(
-            "Tote Zone der Analog-Sticks in Prozent — Ausschläge darunter werden \
-             ignoriert, darüber neu skaliert (0 = aus)",
+            "Analog stick deadzone in percent — inputs below are ignored, \
+             above they are rescaled (0 = off)",
         ),
         "deadzone stick axis analog drift",
         true,
@@ -156,7 +156,7 @@ pub(crate) fn sections(
         0.0,
         50.0,
         1.0,
-        format!("{deadzone} % (0 = aus)"),
+        format!("{deadzone} % (0 = off)"),
         |v, s| s.set_stick_deadzone(v.round() as i64),
     ));
 
@@ -168,7 +168,7 @@ pub(crate) fn sections(
         "dpad touch cursor",
         true,
         dpad_touch,
-    ), "Dpad-Touchpad-Emulation nicht portiert"));
+    ), "Dpad touchpad emulation not ported"));
     dpad.push(inactive(slider_row(
         "controls-dpad-touch-increment",
         "Dpad touch increment",
@@ -181,7 +181,7 @@ pub(crate) fn sections(
         1.0,
         format!("{:.2} mm (default 0.30 mm)", dpad_increment as f64 / 100.0),
         |v, s| s.set_dpad_touch_increment(v.round().clamp(1.0, u16::MAX as f64) as u16),
-    ), "Dpad-Touchpad-Emulation nicht portiert"));
+    ), "Dpad touchpad emulation not ported"));
     for (index, value) in dpad_combos.iter().enumerate() {
         let id: &'static str = match index {
             0 => "controls-dpad-touch-combo-1",
@@ -201,7 +201,7 @@ pub(crate) fn sections(
                 2 => s.set_dpad_touch_shortcut3(v),
                 _ => s.set_dpad_touch_shortcut4(v),
             },
-        ), "Dpad-Touchpad-Emulation nicht portiert"));
+        ), "Dpad touchpad emulation not ported"));
     }
 
     let mut haptics = Section::new("Haptics");

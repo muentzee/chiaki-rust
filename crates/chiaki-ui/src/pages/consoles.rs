@@ -45,8 +45,8 @@ impl ConsoleFilter {
     /// Label (bindend, Spec §2.2).
     pub fn label(self) -> &'static str {
         match self {
-            ConsoleFilter::All => "Alle",
-            ConsoleFilter::Ready => "Bereit",
+            ConsoleFilter::All => "All",
+            ConsoleFilter::Ready => "Ready",
             ConsoleFilter::Offline => "Offline",
             ConsoleFilter::Psn => "PSN",
         }
@@ -87,9 +87,9 @@ pub fn page(
     let mut children: Vec<gpui::AnyElement> = Vec::new();
     children.push(page_header(
         shell,
-        "Konsolen",
+        "Consoles",
         Some(&format!(
-            "{} von {} Konsolen sichtbar",
+            "{} of {} consoles visible",
             filtered.len(),
             entries.len()
         )),
@@ -117,7 +117,7 @@ pub fn page(
                     })),
             )
             .child(
-                Button::new("consoles-regist", "Konsole registrieren")
+                Button::new("consoles-regist", "Register console")
                     .variant(ButtonVariant::Primary)
                     .focus_handle(ui_focus[1].clone())
                     .on_click(cx.listener(|shell, _ev, _window, cx| {
@@ -133,18 +133,18 @@ pub fn page(
             Card::new("consoles-empty")
                 .child(EmptyState::new(
                     icons::paths::SEARCH,
-                    "Keine Konsolen hier",
+                    "No consoles here",
                     match filter {
                         ConsoleFilter::All => {
-                            "Registriere eine Konsole oder füge einen manuellen Host hinzu.\n\
-                             Discovery läuft im Hintergrund weiter."
+                            "Register a console or add a manual host.\n\
+                             Discovery keeps running in the background."
                         }
                         ConsoleFilter::Psn => {
-                            "Keine PSN-Remote-Konsolen gefunden.\n\
-                             Melde dich unter Einstellungen \u{203A} PSN an — die Konsolen deines \
-                             PSN-Accounts erscheinen dann hier."
+                            "No PSN remote consoles found.\n\
+                             Sign in under Settings › PSN — consoles from your \
+                             PSN account will then appear here."
                         }
-                        _ => "Keine Konsole entspricht diesem Filter.",
+                        _ => "No console matches this filter.",
                     },
                 ))
                 .into_any_element(),
@@ -172,7 +172,7 @@ pub fn page(
     // Manueller Host (C++: ManualHostLayer — die Adresse reicht; die
     // Verknüpfung mit einem registrierten Host macht der Registrierungs-
     // erfolg wie im C++ `QmlRegist::success`-Pfad).
-    children.push(SectionLabel::new("Manueller Host").into_any_element());
+    children.push(SectionLabel::new("Manual host").into_any_element());
     children.push(
         Card::new("manual-host-card")
             .child(
@@ -191,14 +191,14 @@ pub fn page(
                                 div()
                                     .text_size(px(theme::SIZE_BODY))
                                     .text_color(theme::TEXT_PRIMARY)
-                                    .child("Manuellen Host hinzufügen"),
+                                    .child("Add manual host"),
                             )
                             .child(
                                 div()
                                     .text_size(px(theme::SIZE_CAPTION))
                                     .text_color(theme::TEXT_SECONDARY)
                                     .child(
-                                        "IP oder Hostname einer Konsole, die per Discovery nicht gefunden wird.",
+                                        "IP or hostname of a console that is not found by discovery.",
                                     ),
                             ),
                     )
@@ -282,7 +282,7 @@ fn manual_host_field(
         .child(
             TextField::new("manual-host-field")
                 .value(value)
-                .placeholder("z. B. 192.168.1.42")
+                .placeholder("e.g. 192.168.1.42")
                 .width(260.0)
                 .focus_handle(focus)
                 .on_change(move |v, _window, cx| {
@@ -291,7 +291,7 @@ fn manual_host_field(
                 }),
         )
         .child(
-            Button::new("manual-host-add", "Hinzufügen").on_click(cx.listener(
+            Button::new("manual-host-add", "Add").on_click(cx.listener(
                 |shell, _ev, _window, cx| add_manual_host(shell, cx),
             )),
         )
@@ -303,8 +303,8 @@ fn add_manual_host(shell: &mut AppShell, cx: &mut Context<AppShell>) {
     let addr = shell.regist_wizard.manual_host.trim().to_string();
     if addr.is_empty() {
         shell.push_toast(
-            ToastData::new(ToastKind::Warn, "Keine Adresse")
-                .message("Gib eine IP oder einen Hostnamen ein."),
+            ToastData::new(ToastKind::Warn, "No address")
+                .message("Enter an IP or hostname."),
             cx,
         );
         return;
@@ -321,13 +321,13 @@ fn add_manual_host(shell: &mut AppShell, cx: &mut Context<AppShell>) {
         Ok(_) => {
             shell.regist_wizard.manual_host.clear();
             shell.push_toast(
-                ToastData::new(ToastKind::Success, "Manueller Host hinzugefügt").message(addr),
+                ToastData::new(ToastKind::Success, "Manual host added").message(addr),
                 cx,
             );
         }
         Err(err) => {
             shell.push_toast(
-                ToastData::new(ToastKind::Danger, "Speichern fehlgeschlagen")
+                ToastData::new(ToastKind::Danger, "Save failed")
                     .message(err.to_string()),
                 cx,
             );

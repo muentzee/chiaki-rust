@@ -300,7 +300,7 @@ pub fn panel(
     snap: &StreamSnapshot,
     handlers: PanelHandlers,
 ) -> gpui::AnyElement {
-    let mic_label = if snap.mic_unmuted { "Mikrofon stummschalten" } else { "Mikrofon aktivieren" };
+    let mic_label = if snap.mic_unmuted { "Mute microphone" } else { "Enable microphone" };
 
     div()
         .absolute()
@@ -314,7 +314,7 @@ pub fn panel(
                         .text_size(px(theme::SIZE_HEADLINE))
                         .font_weight(gpui::FontWeight(theme::WEIGHT_HEADLINE))
                         .text_color(theme::TEXT_PRIMARY)
-                        .child("Stream-Panel"),
+                        .child("Stream panel"),
                 )
                 .children(stats_row(snap))
                 .child(
@@ -323,13 +323,13 @@ pub fn panel(
                         .flex_col()
                         .gap_2()
                         .child(
-                            Button::new("panel-disconnect", "Trennen…")
+                            Button::new("panel-disconnect", "Disconnect…")
                                 .variant(ButtonVariant::Danger)
                                 .full_width()
                                 .on_click(handlers.disconnect),
                         )
                         .child(
-                            Button::new("panel-gotobed", "Ruhemodus (Konsole)")
+                            Button::new("panel-gotobed", "Rest mode (console)")
                                 .full_width()
                                 .on_click(handlers.goto_bed),
                         )
@@ -341,7 +341,7 @@ pub fn panel(
                         .child(
                             Button::new(
                                 "panel-zoom",
-                                format!("Skalierung: {} (H-Panel)", snap.zoom.label()),
+                                format!("Scaling: {} (H panel)", snap.zoom.label()),
                             )
                             .full_width()
                             .on_click(handlers.zoom),
@@ -353,7 +353,7 @@ pub fn panel(
                         .text_color(theme::TEXT_DISABLED)
                         // Kurz genug für eine Zeile in der 320-px-Panel-
                         // Breite (sonst hängt ein Solo-„?“ in Zeile 2).
-                        .child("H = Panel · F11 = Vollbild · Esc = Trennen?"),
+                        .child("H = panel · F11 = fullscreen · Esc = disconnect?"),
                 ),
         )
         .into_any_element()
@@ -372,7 +372,7 @@ pub fn options_button(
     active: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::AnyElement {
-    IconButton::new("stream-options", crate::icons::paths::SETTINGS, "Optionen (H)")
+    IconButton::new("stream-options", crate::icons::paths::SETTINGS, "Options (H)")
         .active(active)
         .size(40.0)
         .on_click(on_click)

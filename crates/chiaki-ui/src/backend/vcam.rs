@@ -45,7 +45,7 @@ pub fn resolve_feed_addr(backend: &Backend) -> Result<String, String> {
 /// PID zurück, deshalb hier der Vorab-Check).
 pub fn start_headless_now(backend: &Backend) -> Result<u32, String> {
     if chiaki_virtualcam::is_running() {
-        return Err("Es läuft bereits ein Headless-Feed".to_string());
+        return Err("A headless feed is already running".to_string());
     }
     let addr = resolve_feed_addr(backend)?;
     spawn_detached(&addr)
@@ -54,13 +54,13 @@ pub fn start_headless_now(backend: &Backend) -> Result<u32, String> {
 /// Spawnt den Headless-Prozess detached (überlebt das GUI-Fenster).
 fn spawn_detached(addr: &str) -> Result<u32, String> {
     let exe = std::env::current_exe()
-        .map_err(|e| format!("eigenes exe-Pfad nicht ermittelbar: {e}"))?;
+        .map_err(|e| format!("could not determine own exe path: {e}"))?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("--virtualcam").arg(addr);
     cmd.creation_flags(SPAWN_FLAGS);
     let child = cmd
         .spawn()
-        .map_err(|e| format!("Headless-Prozess konnte nicht gestartet werden: {e}"))?;
+        .map_err(|e| format!("Failed to start headless process: {e}"))?;
     tracing::info!("Headless-Feed gestartet (PID {}, Ziel {addr})", child.id());
     Ok(child.id())
 }
@@ -69,10 +69,10 @@ fn spawn_detached(addr: &str) -> Result<u32, String> {
 /// die Kachel kennt die Adresse der Konsole, kein Registry-Lookup nötig).
 pub fn start_headless_now_with_addr(backend: &Backend, addr: &str) -> Result<u32, String> {
     if chiaki_virtualcam::is_running() {
-        return Err("Es läuft bereits ein Headless-Feed".to_string());
+        return Err("A headless feed is already running".to_string());
     }
     if addr.is_empty() {
-        return Err("Keine Adresse für diese Konsole bekannt".to_string());
+        return Err("No address known for this console".to_string());
     }
     spawn_detached(addr)
 }

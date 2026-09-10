@@ -30,29 +30,29 @@ use crate::pages::{page_header, page_scaffold};
 use crate::theme;
 
 /// Die 3 Wizard-Schritte (Reihenfolge bindend).
-pub const WIZARD_STEPS: [&str; 3] = ["Art der Konsole", "PIN / PSN", "Ergebnis"];
+pub const WIZARD_STEPS: [&str; 3] = ["Console type", "PIN / PSN", "Result"];
 
 /// Target-Presets des Wizards (Werte = ChiakiTarget, wie im C++-QML).
 const TARGET_PRESETS: [(chiaki_settings::hosts::Target, &str, &str); 4] = [
     (
         chiaki_settings::hosts::Target::Ps4Eight,
-        "PS4 Firmware < 7.0",
-        "Registrierung mit PSN-Online-ID",
+        "PS4 firmware < 7.0",
+        "Registration with PSN online ID",
     ),
     (
         chiaki_settings::hosts::Target::Ps4Nine,
-        "PS4 Firmware 7.0 – 8.0",
-        "Registrierung mit PSN-Account-ID (Base64)",
+        "PS4 firmware 7.0 – 8.0",
+        "Registration with PSN account ID (Base64)",
     ),
     (
         chiaki_settings::hosts::Target::Ps4Ten,
-        "PS4 Firmware ≥ 8.0",
-        "Registrierung mit PSN-Account-ID (Base64)",
+        "PS4 firmware ≥ 8.0",
+        "Registration with PSN account ID (Base64)",
     ),
     (
         chiaki_settings::hosts::Target::Ps5One,
         "PS5",
-        "Registrierung mit PSN-Account-ID (Base64)",
+        "Registration with PSN account ID (Base64)",
     ),
 ];
 
@@ -178,7 +178,7 @@ pub fn page(
     let running = state.regist.as_ref().map(|r| r.snapshot().running).unwrap_or(false);
 
     let mut children: Vec<gpui::AnyElement> = Vec::new();
-    children.push(page_header(shell, "Konsole registrieren", None, window, cx));
+    children.push(page_header(shell, "Register console", None, window, cx));
 
     // StepBar (Fortschrittsanzeige, Spec §2.2): erledigt = Check,
     // aktiv = Akzent-Kontur, kommend = dezent.
@@ -236,24 +236,24 @@ pub fn page(
     });
 
     // Fußleiste: Abbrechen/Zurück links, Weiter/Aktionen rechts.
-    let back_label = if step == 0 { "Abbrechen" } else { "Zurück" };
+    let back_label = if step == 0 { "Cancel" } else { "Back" };
     let can_continue = step == 0 || auth_valid(shell);
     let next = match step {
-        0 => Button::new("wizard-next", "Weiter")
+        0 => Button::new("wizard-next", "Next")
             .variant(ButtonVariant::Primary)
             .on_click(cx.listener(|shell, _ev, window, cx| {
                 window.blur();
                 shell.regist_wizard.step = 1;
                 cx.notify();
             })),
-        1 => Button::new("wizard-register", "Registrieren")
+        1 => Button::new("wizard-register", "Register")
             .variant(ButtonVariant::Primary)
             .disabled(!can_continue || running)
             .on_click(cx.listener(|shell, _ev, _window, cx| {
                 start_regist(shell, cx);
             })),
         _ => {
-            let label = if running { "Läuft …" } else { "Fertig" };
+            let label = if running { "Running …" } else { "Done" };
             Button::new("wizard-close", label)
                 .variant(ButtonVariant::Primary)
                 .on_click(cx.listener(|shell, _ev, _window, cx| {
@@ -301,7 +301,7 @@ fn step_target(shell: &mut AppShell, cx: &mut Context<AppShell>) -> Card {
     let weak = cx.entity().downgrade();
 
     let mut card = Card::new("wizard-target");
-    card = card.child(SectionLabel::new("Art der Konsole"));
+    card = card.child(SectionLabel::new("Console type"));
     for (target, label, hint) in TARGET_PRESETS {
         let is_selected = selected == target;
         let (bg, border) = if is_selected {
@@ -362,13 +362,13 @@ fn step_target(shell: &mut AppShell, cx: &mut Context<AppShell>) -> Card {
             .flex_col()
             .gap_2()
             .mt_1()
-            .child(SectionLabel::new("Host-Adresse"))
+            .child(SectionLabel::new("Host address"))
             .child(
                 div()
                     .text_size(px(theme::SIZE_CAPTION))
                     .text_color(theme::TEXT_SECONDARY)
                     .child(
-                        "IP der Konsole — oder 255.255.255.255, um im lokalen Netz zu broadcasten.",
+                        "Console IP — or 255.255.255.255 to broadcast on the local network.",
                     ),
             )
             .child(
@@ -401,14 +401,14 @@ fn step_auth(shell: &mut AppShell, cx: &mut Context<AppShell>) -> Card {
     let weak = cx.entity().downgrade();
 
     let account_label = if ps4_pre7 {
-        "PSN Online-ID"
+        "PSN online ID"
     } else {
-        "PSN Account-ID (Base64)"
+        "PSN account ID (Base64)"
     };
     let account_hint = if ps4_pre7 {
-        "Benutzername (Groß-/Kleinschreibung) — nur für PS4 < 7.0."
+        "Username (case-sensitive) — only for PS4 < 7.0."
     } else {
-        "Base64-Account-ID — aus der PSN-Anmeldung vorausgefüllt."
+        "Base64 account ID — pre-filled from the PSN sign-in."
     };
     let account_valid = if ps4_pre7 {
         !account.trim().is_empty()
@@ -417,28 +417,28 @@ fn step_auth(shell: &mut AppShell, cx: &mut Context<AppShell>) -> Card {
     };
 
     let mut card = Card::new("wizard-auth");
-    card = card.child(SectionLabel::new("Anmeldung"));
+    card = card.child(SectionLabel::new("Sign-in"));
     card = card.child(auth_row(
         "wizard-account-row",
         account_label,
         account_hint,
         crate::components::TextField::new("wizard-account")
             .value(account.clone())
-            .placeholder(if ps4_pre7 { "PSN-Benutzername" } else { "z. B. eVr/5uFEAHE=" })
+            .placeholder(if ps4_pre7 { "PSN username" } else { "e.g. eVr/5uFEAHE=" })
             .width(340.0)
             .focus_handle(account_focus)
             .on_change(wizard_text_change(&weak, |shell, value| {
                 shell.regist_wizard.account_id = value
             })),
         (!account.trim().is_empty() && !account_valid)
-            .then(|| "Account-ID muss exakt 8 Base64-kodierte Bytes ergeben.")
+            .then(|| "Account ID must decode to exactly 8 Base64-encoded bytes.")
             .map(text_hint),
     ));
 
     card = card.child(auth_row(
         "wizard-pin-row",
-        "Remote-Play-PIN",
-        "Wird auf der Konsole angezeigt: Einstellungen → System → Remote-Play → Gerät verknüpfen.",
+        "Remote play PIN",
+        "Shown on the console: Settings → System → Remote Play → Link device.",
         crate::components::TextField::new("wizard-pin")
             .value(pin.clone())
             .placeholder("12345678")
@@ -450,13 +450,13 @@ fn step_auth(shell: &mut AppShell, cx: &mut Context<AppShell>) -> Card {
                     value.chars().filter(|c| c.is_ascii_digit()).take(8).collect();
                 shell.regist_wizard.pin = filtered;
             })),
-        (!pin.is_empty() && pin.len() != 8).then(|| "Die PIN ist immer 8-stellig.").map(text_hint),
+        (!pin.is_empty() && pin.len() != 8).then(|| "The PIN is always 8 digits.").map(text_hint),
     ));
 
     card.child(auth_row(
         "wizard-cpin-row",
-        "Konsolen-Login-PIN (optional)",
-        "4-stelliger Login-PIN des Nutzerkontos — wird für künftige Streams gespeichert.",
+        "Console login PIN (optional)",
+        "4-digit login PIN of the user account — stored for future streams.",
         crate::components::TextField::new("wizard-console-pin")
             .value(console_pin.clone())
             .placeholder("0000")
@@ -468,7 +468,7 @@ fn step_auth(shell: &mut AppShell, cx: &mut Context<AppShell>) -> Card {
                 shell.regist_wizard.console_pin = filtered;
             })),
         (!console_pin.is_empty() && console_pin.len() != 4)
-            .then(|| "Der Login-PIN ist 4-stellig (oder leer).")
+            .then(|| "The login PIN is 4 digits (or empty).")
             .map(text_hint),
     ))
 }
@@ -582,7 +582,7 @@ fn step_result(shell: &mut AppShell, _window: &mut Window, _cx: &mut Context<App
         .unwrap_or_default();
 
     let mut card = Card::new("wizard-result");
-    card = card.child(SectionLabel::new("Vorgangs-Log"));
+    card = card.child(SectionLabel::new("Operation log"));
 
     // Live-Log (scrollbar; neue Zeilen kommen über UiEvent::Regist-Notifies).
     let mut log = div()
@@ -602,7 +602,7 @@ fn step_result(shell: &mut AppShell, _window: &mut Window, _cx: &mut Context<App
             div()
                 .text_size(px(theme::SIZE_CAPTION))
                 .text_color(theme::TEXT_DISABLED)
-                .child("Warte auf die Konsole …"),
+                .child("Waiting for the console …"),
         );
     }
     for (i, line) in snapshot.lines.iter().enumerate() {
@@ -618,20 +618,20 @@ fn step_result(shell: &mut AppShell, _window: &mut Window, _cx: &mut Context<App
 
     // Statuszeile: läuft / erfolgreich (mit Host-Namen) / fehlgeschlagen.
     card.child(match (&snapshot.result, snapshot.running) {
-        (None, true) => status_row(StatusKind::Ready, "Registrierung läuft …", theme::TEXT_PRIMARY),
+        (None, true) => status_row(StatusKind::Ready, "Registration running …", theme::TEXT_PRIMARY),
         (Some(Ok(nickname)), _) => {
             // Hinweis: Der Erfolg kommt zusätzlich als Backend-Toast
             // (UiEvent::Toast) — hier die permanente Anzeige im Wizard.
             status_row(
                 StatusKind::Ready,
-                &format!("Konsole „{nickname}“ registriert"),
+                &format!("Console \"{nickname}\" registered"),
                 theme::SUCCESS,
             )
         }
         (Some(Err(reason)), _) => status_row(StatusKind::Unregistered, reason, theme::DANGER),
         (None, false) => status_row(
             StatusKind::Offline,
-            "Kein Vorgang — bitte zurückgehen und erneut starten.",
+            "No registration in progress — please go back and start again.",
             theme::TEXT_SECONDARY,
         ),
     })

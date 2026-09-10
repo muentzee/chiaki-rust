@@ -58,7 +58,7 @@ pub(crate) fn sections(
                 shell.push_toast(
                     crate::components::ToastData::new(
                         crate::components::ToastKind::Info,
-                        "PSN-Konsolen werden geladen …",
+                        "Loading PSN consoles…",
                     ),
                     cx,
                 );
@@ -88,9 +88,9 @@ pub(crate) fn sections(
                 shell.push_toast(
                     crate::components::ToastData::new(
                         crate::components::ToastKind::Info,
-                        "PSN abgemeldet",
+                        "PSN signed out",
                     )
-                    .message("PSN-Token gelöscht."),
+                    .message("PSN token cleared."),
                     cx,
                 );
             },

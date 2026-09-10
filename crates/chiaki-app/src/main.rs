@@ -101,7 +101,7 @@ fn init_process_priority() {
     };
     if let Err(e) = result {
         // tracing ist hier (noch) nicht initialisiert → stderr.
-        eprintln!("chiaki: SetPriorityClass(HIGH_PRIORITY_CLASS) fehlgeschlagen: {e}");
+        eprintln!("chiaki: SetPriorityClass(HIGH_PRIORITY_CLASS) failed: {e}");
     }
 }
 

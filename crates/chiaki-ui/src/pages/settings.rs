@@ -340,7 +340,7 @@ fn row(
 /// Erklärzeilen-Suffix für im Rust-Build inaktive Settings
 /// („— im Rust-Build ohne Funktion (…Grund…)“).
 pub(crate) fn inactive_hint(reason: &str) -> String {
-    format!(" \u{2014} im Rust-Build ohne Funktion ({reason})")
+    format!(" \u{2014} not functional in the Rust build ({reason})")
 }
 
 /// Markiert eine Row als im Rust-Build inaktiv: setzt das Audit-Flag
@@ -348,7 +348,7 @@ pub(crate) fn inactive_hint(reason: &str) -> String {
 /// „Rust: inaktiv“ (Warn-Farbe) + Hinweistext an (Suchtext wird erweitert).
 pub(crate) fn inactive_with(mut row: SRow, hint: String, reason: &'static str) -> SRow {
     row.inactive = Some(reason);
-    row.search.push_str(" rust inaktiv ");
+    row.search.push_str(" rust inactive ");
     row.search.push_str(&hint.to_lowercase());
     row.element = div()
         .flex()
@@ -365,7 +365,7 @@ pub(crate) fn inactive_with(mut row: SRow, hint: String, reason: &'static str) -
                     div()
                         .text_size(px(theme::SIZE_CAPTION))
                         .text_color(theme::WARN)
-                        .child("Rust: inaktiv"),
+                        .child("Rust: inactive"),
                 )
                 .child(
                     div()
@@ -835,7 +835,7 @@ fn build_children(
     let searching = !needle.is_empty();
 
     let mut children: Vec<gpui::AnyElement> = Vec::new();
-    children.push(page_header(shell, "Einstellungen", None, window, cx));
+    children.push(page_header(shell, "Settings", None, window, cx));
 
     // Kopfzeile: Suchfeld + Treffer-Zählung bzw. aktive Kategorie.
     let search_focus = cx

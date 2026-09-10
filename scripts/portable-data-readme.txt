@@ -1,18 +1,17 @@
-chiaki-remaster (portable Version)
+chiaki-remaster (portable version)
 ==================================
 
-Dieser "data"-Ordner macht diese Installation portabel: Es werden keine
-Daten ins Benutzerprofil (AppData) geschrieben, alles bleibt im
-Programmverzeichnis neben der chiaki.exe.
+This "data" folder makes the installation portable: nothing is written to
+the user profile (AppData), everything stays in the program directory
+next to chiaki.exe.
 
-Hier landen:
-- settings.ini              alle Einstellungen
-- profiles/*.ini            Verbindungsprofile inkl. PSN-Daten
-                            (Refresh-Token, Account-IDs)
-- placebo_render_params.ini Render-Parameter (libplacebo)
-- log/                      Logdateien
-- cache/                    Cache-Dateien
+This folder contains:
+- settings.ini              all settings
+- profiles/*.ini            connection profiles incl. PSN data
+                            (refresh tokens, account IDs)
+- placebo_render_params.ini render parameters (libplacebo)
+- log/                      log files
+- cache/                    cache files
 
-Diesen Ordner bei Updates oder Umzügen mitkopieren (oder das ganze
-Programmverzeichnis sichern), sonst gehen Einstellungen und
-PSN-Anmeldung verloren.
+Copy this folder when updating or moving the installation (or back up the
+whole program directory), otherwise your settings and PSN sign-in are lost.

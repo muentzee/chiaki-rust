@@ -79,16 +79,15 @@ impl CamFeed {
     pub fn open(config: CamFeedConfig) -> Result<Self, String> {
         let (w, h) = Self::target_dims(&config);
         if w % 2 != 0 || h % 2 != 0 || w == 0 || h == 0 {
-            return Err(format!("Ungültige Kamera-Dimensionen {w}x{h}"));
+            return Err(format!("Invalid camera dimensions {w}x{h}"));
         }
         if config.fps == 0 {
-            return Err("Kamera-FPS ist 0".into());
+            return Err("Camera FPS is 0".into());
         }
         if !crate::registry::obs_virtualcam_available() {
             return Err(
-                "OBS Virtual Camera ist nicht installiert — OBS installieren (die Virtual \
-                 Camera wird mit OBS registriert) oder OBS die Virtual Camera einmal starten \
-                 lassen"
+                "OBS Virtual Camera is not installed — install OBS Studio (the Virtual \
+                 Camera is registered with OBS) or let OBS start its Virtual Camera once"
                     .into(),
             );
         }
@@ -96,7 +95,7 @@ impl CamFeed {
             .format(PixelFormat::NV12)
             .backend(BackendKind::Obs)
             .build()
-            .map_err(|err| format!("Virtuelle Kamera konnte nicht geöffnet werden: {err}"))?;
+            .map_err(|err| format!("Could not open virtual camera: {err}"))?;
         tracing::info!(
             "Virtuelle Kamera aktiv: „{}“ ({}x{} @ {}, Quelle {}x{})",
             camera.device(),

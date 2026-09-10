@@ -44,7 +44,7 @@ pub fn view(
                 .text_size(px(theme::SIZE_DISPLAY))
                 .font_weight(gpui::FontWeight(theme::WEIGHT_DISPLAY))
                 .text_color(theme::TEXT_PRIMARY)
-                .child(format!("Verbinde mit {}", snap.host_label)),
+                .child(format!("Connecting to {}", snap.host_label)),
         )
         .child(
             div()
@@ -64,13 +64,13 @@ pub fn view(
             vec![div()
                 .text_size(px(theme::SIZE_CAPTION))
                 .text_color(theme::TEXT_DISABLED)
-                .child("FAKE-Mode (CHIAKI_UI_FAKE_STREAM) — keine echte Konsole".to_string())
+                .child("FAKE mode (CHIAKI_UI_FAKE_STREAM) — no real console".to_string())
                 .into_any_element()]
         } else {
             vec![]
         })
         .child(
-            Button::new("stream-cancel", "Abbrechen")
+            Button::new("stream-cancel", "Cancel")
                 .variant(ButtonVariant::Danger)
                 .on_click(cancel),
         )
@@ -82,7 +82,7 @@ fn station_row(index: usize, label: &str, state: StageState) -> gpui::AnyElement
         StageState::Pending => (theme::TEXT_DISABLED, theme::TEXT_DISABLED, ""),
         StageState::Active => (theme::ACCENT, theme::TEXT_PRIMARY, " …"),
         StageState::Done => (theme::SUCCESS, theme::TEXT_PRIMARY, ""),
-        StageState::Failed => (theme::DANGER, theme::DANGER, " — fehlgeschlagen"),
+        StageState::Failed => (theme::DANGER, theme::DANGER, " — failed"),
     };
     div()
         .flex()
@@ -118,7 +118,7 @@ mod tests {
     fn stationen_sind_bindend() {
         assert_eq!(
             CONNECTING_STATIONS,
-            ["Aufwecken", "Anmelden", "Verbindung kalibrieren", "Streamen"]
+            ["Wake", "Log in", "Calibrate connection", "Streaming"]
         );
     }
 

@@ -80,7 +80,7 @@ impl Dialog {
 
     /// Standard: Abbrechen (Ghost, schließt) + Bestätigen (Primary, schließt).
     pub fn confirm(self) -> Self {
-        self.button(DialogButton::new("Abbrechen", ButtonVariant::Ghost))
+        self.button(DialogButton::new("Cancel", ButtonVariant::Ghost))
             .button(DialogButton::new("OK", ButtonVariant::Primary))
     }
 

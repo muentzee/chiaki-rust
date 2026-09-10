@@ -225,13 +225,13 @@ pub fn page(
                         div()
                             .text_size(px(theme::SIZE_HEADLINE))
                             .text_color(theme::TEXT_SECONDARY)
-                            .child("Kein Video-Signal"),
+                            .child("No video signal"),
                     )
                     .child(
                         div()
                             .text_size(px(theme::SIZE_CAPTION))
                             .text_color(theme::TEXT_DISABLED)
-                            .child("Warte auf Frames der Session…".to_string()),
+                            .child("Waiting for frames from the session…".to_string()),
                     )
                     .into_any_element(),
             });

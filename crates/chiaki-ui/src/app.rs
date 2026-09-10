@@ -40,9 +40,9 @@ impl Route {
     pub fn nav_items() -> [(Route, &'static str, &'static str); 4] {
         [
             (Route::Home, icons::paths::HOME, "Home"),
-            (Route::Consoles, icons::paths::CONSOLE, "Konsolen"),
-            (Route::Settings, icons::paths::SETTINGS, "Einstellungen"),
-            (Route::Info, icons::paths::INFO, "Info"),
+            (Route::Consoles, icons::paths::CONSOLE, "Consoles"),
+            (Route::Settings, icons::paths::SETTINGS, "Settings"),
+            (Route::Info, icons::paths::INFO, "About"),
         ]
     }
 }
@@ -87,7 +87,7 @@ impl AppShell {
             .map(|v| !v.is_empty() && v != "0")
             .unwrap_or(false)
         {
-            Route::Stream(HostId::Address { host: "FAKE-STREAM".into() })
+            Route::Stream(HostId::Address { host: "Fake stream".into() })
         } else {
             Route::Home
         };
@@ -317,7 +317,7 @@ impl AppShell {
             E::Quit { reason, reason_str } => {
                 if chiaki_core::session::quit_reason_is_error(reason) {
                     self.push_toast(
-                        ToastData::new(crate::components::ToastKind::Danger, "Verbindung beendet")
+                        ToastData::new(crate::components::ToastKind::Danger, "Connection ended")
                             .message(reason_str),
                         cx,
                     );
@@ -325,7 +325,7 @@ impl AppShell {
             }
             E::LoginPinRequest { .. } => {
                 self.push_toast(
-                    ToastData::new(crate::components::ToastKind::Info, "PIN-Eingabe erwartet"),
+                    ToastData::new(crate::components::ToastKind::Info, "PIN required"),
                     cx,
                 );
             }

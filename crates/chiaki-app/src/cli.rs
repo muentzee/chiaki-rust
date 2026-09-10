@@ -77,23 +77,24 @@ pub fn parse(argv: &[String]) -> Result<Parsed, String> {
 }
 
 /// Hilfetext (`--help`), analog zur Optionstabelle des C++-Parsers.
+/// Text ist UI-sichtbar → Englisch (Kommentare bleiben deutsch).
 pub fn help_text() -> String {
     // Keine `\`-Zeilenfortsetzung verwenden — die streicht führenden Whitespace.
     "\
-chiaki — Chiaki Remaster (chiaki-ng Rust-Port, Windows)
+chiaki — Chiaki Remaster (chiaki-ng Rust port, Windows)
 
-Usage: chiaki [Optionen]
+Usage: chiaki [options]
 
-Optionen:
-  --profile <name>  Verbindungsprofil laden (profiles/<name>.ini statt
-                    settings.ini); für Steam-Shortcut-Launch-Options.
+Options:
+  --profile <name>  Load a connection profile (profiles/<name>.ini instead of
+                    settings.ini); used for Steam shortcut launch options.
   --virtualcam [host]
-                    Headless-Virtualcam-Modus: streamt zum Host in die
-                    virtuelle Kamera (OBS Virtual Camera), Ton bleibt lokal.
-                    host = Nickname aus der Host-Registry oder eine IP-
-                    Adresse; ohne Angabe wird der erste zugeordnete
-                    manuelle Host benutzt.
-  -h, --help        Diesen Hilfetext anzeigen und beenden.
+                    Headless virtual camera mode: streams to the host into
+                    the virtual camera (OBS Virtual Camera), audio stays on
+                    this PC. host = nickname from the host registry or an IP
+                    address; if omitted, the first mapped manual host is
+                    used.
+  -h, --help        Show this help text and exit.
 "
     .to_string()
 }

@@ -138,8 +138,8 @@ fn run(
         telemetry.audio_fill_ms_x10.store(((45.0 + wobble) * 10.0) as u32, Ordering::Relaxed);
         telemetry.rtt_ms_x10.store(42, Ordering::Relaxed); // 4.2 ms
         *telemetry.decoder_backend.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some("Software (Fake)".into());
-        *telemetry.haptics_mode.lock().unwrap_or_else(|e| e.into_inner()) = "aus".into();
+            Some("Software (fake)".into());
+        *telemetry.haptics_mode.lock().unwrap_or_else(|e| e.into_inner()) = "off".into();
 
         frame_index += 1;
         std::thread::sleep(frame_period);

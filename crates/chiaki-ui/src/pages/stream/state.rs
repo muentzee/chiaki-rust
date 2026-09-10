@@ -82,10 +82,10 @@ pub(crate) fn ensure_and_tick(
         cx.spawn(async move |_shell_weak, cx| {
             let _ = shell.update(cx, |shell, cx| {
                 shell.push_toast(
-                    ToastData::new(crate::components::ToastKind::Warn, "WLAN/Netzwerk-Drops")
+                    ToastData::new(crate::components::ToastKind::Warn, "Wi-Fi/network drops")
                         .message(
-                            "Hoher Frame-Verlust im Netzwerk — der Stream kann ruckeln. \
-                             (Schwellwert: Einstellungen → Audio & Latency)",
+                            "High frame loss on the network — the stream may stutter. \
+                             (Threshold: Settings → Audio & Latency)",
                         ),
                     cx,
                 );
@@ -170,7 +170,7 @@ pub(crate) fn maybe_open_disconnect_dialog(
 
 /// Die 4 Status-Stationen (bindend, Spec §2.4).
 pub const CONNECTING_STATIONS: [&str; 4] =
-    ["Aufwecken", "Anmelden", "Verbindung kalibrieren", "Streamen"];
+    ["Wake", "Log in", "Calibrate connection", "Streaming"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
@@ -215,7 +215,7 @@ impl ZoomMode {
         match self {
             ZoomMode::Fit => "Original",
             ZoomMode::Zoom => "Zoom",
-            ZoomMode::Stretch => "Strecken",
+            ZoomMode::Stretch => "Stretch",
         }
     }
 
@@ -864,7 +864,7 @@ impl StreamUiState {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .update(|s| s.add_registered_host(registered));
-                let display = if nickname.is_empty() { "Konsole".to_string() } else { nickname };
+                let display = if nickname.is_empty() { "Console".to_string() } else { nickname };
                 match result {
                     Ok(()) => {
                         let shell = self.shell.clone();
@@ -873,7 +873,7 @@ impl StreamUiState {
                                 shell.push_toast(
                                     ToastData::new(
                                         crate::components::ToastKind::Success,
-                                        "Konsole registriert",
+                                        "Console registered",
                                     )
                                     .message(display),
                                     cx,
@@ -941,7 +941,7 @@ impl StreamUiState {
                 cx.spawn(async move |_shell_weak, cx| {
                     let _ = shell.update(cx, |shell, cx| {
                         shell.push_toast(
-                            ToastData::new(kind, "Stream beendet").message(toast_text),
+                            ToastData::new(kind, "Stream ended").message(toast_text),
                             cx,
                         );
                         shell.navigate(crate::app::Route::Home, cx);
@@ -1401,10 +1401,10 @@ impl StreamUiState {
             if vsr_scale > 100 {
                 format!("{}x", vsr_scale / 100)
             } else {
-                "an".to_string()
+                "on".to_string()
             }
         } else {
-            "aus".to_string()
+            "off".to_string()
         };
         let slot_drops = match self.backend.sessions().active() {
             Some(active) => active.shared_video_slot().dropped().to_string(),
@@ -1505,22 +1505,22 @@ impl StreamUiState {
         match self.stage {
             Stage::Wake => {
                 if self.fake {
-                    "Sende Wakeup-Paket (fake)…".into()
+                    "Sending wake-up packet (fake)…".into()
                 } else if self.standby {
-                    "Konsole ist im Ruhemodus — Wakeup gesendet, warte auf Reaktion…".into()
+                    "Console is in rest mode — wake-up sent, waiting for a response…".into()
                 } else {
-                    "Konsole ist erreichbar".into()
+                    "Console is reachable".into()
                 }
             }
             Stage::Login => {
                 if self.pin.visible {
-                    "Konsole verlangt die Login-PIN".into()
+                    "Console requests the login PIN".into()
                 } else {
-                    "Session-Anfrage läuft (Session-Request + Ctrl)…".into()
+                    "Session request in progress (Session Request + Ctrl)…".into()
                 }
             }
-            Stage::Calibrate => "Senkusha: RTT/MTU-Kalibrierung mit der Konsole…".into(),
-            Stage::Streaming => "Stream läuft".into(),
+            Stage::Calibrate => "Senkusha: RTT/MTU calibration with the console…".into(),
+            Stage::Streaming => "Stream running".into(),
         }
     }
 }
@@ -1609,7 +1609,7 @@ pub fn resolve_request(backend: &Backend, host: &HostId) -> Result<(ConnectReque
             let registered = settings
                 .registered_host(HostMac::new(*mac))
                 .cloned()
-                .ok_or_else(|| format!("Host {} ist nicht registriert", mac_string(mac)))?;
+                .ok_or_else(|| format!("Host {} is not registered", mac_string(mac)))?;
             // Adresse: Discovery → verknüpfter ManualHost.
             let addr = matching_discovery_host(backend, host)
                 .map(|h| h.host_addr)
@@ -1621,7 +1621,7 @@ pub fn resolve_request(backend: &Backend, host: &HostId) -> Result<(ConnectReque
                         .map(|m| m.host.clone())
                 })
                 .ok_or_else(|| {
-                    "Konsole nicht sichtbar — bitte Discovery abwarten oder Adresse prüfen".to_string()
+                    "Console not visible — wait for discovery or check the address".to_string()
                 })?;
             let standby = matching_discovery_host(backend, host)
                 .map(|h| h.state == DiscoveryHostState::Standby)
@@ -1636,12 +1636,12 @@ pub fn resolve_request(backend: &Backend, host: &HostId) -> Result<(ConnectReque
                 .manual_hosts()
                 .into_iter()
                 .find(|m| m.id == *id)
-                .ok_or_else(|| format!("Manueller Host {id} nicht gefunden"))?;
+                .ok_or_else(|| format!("Manual host {id} not found"))?;
             let registered = settings
                 .registered_host(manual.registered_mac)
                 .cloned()
                 .ok_or_else(|| {
-                    "Zum manuellen Host ist keine Registrierung hinterlegt".to_string()
+                    "No registration stored for the manual host".to_string()
                 })?;
             Ok((
                 ConnectRequest::from_manual(&manual, &registered, LinkQuality::Local),
@@ -1649,7 +1649,7 @@ pub fn resolve_request(backend: &Backend, host: &HostId) -> Result<(ConnectReque
             ))
         }
         HostId::Address { host } => Err(format!(
-            "Direktverbindung zu {host} braucht eine Registrierung (Auto-Regist folgt)"
+            "Direct connection to {host} requires a registration (auto-regist to follow)"
         )),
         // PSN-Remote-Verbindung (C++ connectToHost-PSN-Zweig): ConnectRequest
         // mit Holepunch-Session aus den Settings-Token bauen (Token/Account-

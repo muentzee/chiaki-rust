@@ -382,7 +382,7 @@ pub fn start_psn_login_for_settings(
             Err(err) => {
                 tracing::error!("psn_login: Login fehlgeschlagen: {err}");
                 events.send(UiEvent::Toast(
-                    ToastData::new(ToastKind::Danger, "PSN-Anmeldung fehlgeschlagen")
+                    ToastData::new(ToastKind::Danger, "PSN sign-in failed")
                         .message(err.to_string()),
                 ));
                 return;
@@ -404,8 +404,8 @@ pub fn start_psn_login_for_settings(
         if let Err(err) = save {
             tracing::error!("psn_login: Tokens konnten nicht gespeichert werden: {err}");
             events.send(UiEvent::Toast(
-                ToastData::new(ToastKind::Danger, "PSN-Anmeldung fehlgeschlagen")
-                    .message(format!("Konnte Settings nicht speichern: {err}")),
+                ToastData::new(ToastKind::Danger, "PSN sign-in failed")
+                    .message(format!("Could not save settings: {err}")),
             ));
             return;
         }
@@ -425,16 +425,16 @@ pub fn start_psn_login_for_settings(
                 }
                 tracing::info!("psn_login: PSN-Anmeldung erfolgreich (Account-ID gespeichert)");
                 events.send(UiEvent::Toast(
-                    ToastData::new(ToastKind::Success, "PSN verbunden")
-                        .message("Anmeldung erfolgreich — PSN Remote Play ist aktiv."),
+                    ToastData::new(ToastKind::Success, "PSN connected")
+                        .message("Sign-in successful — PSN Remote Play is active."),
                 ));
             }
             Err(err) => {
                 tracing::error!("psn_login: Account-ID konnte nicht geholt werden: {err}");
                 events.send(UiEvent::Toast(
-                    ToastData::new(ToastKind::Warn, "PSN unvollständig verbunden")
+                    ToastData::new(ToastKind::Warn, "PSN partially connected")
                         .message(format!(
-                            "Tokens gespeichert, aber Account-ID fehlgeschlagen: {err}"
+                            "Tokens saved, but account ID failed: {err}"
                         )),
                 ));
             }
