@@ -6,3 +6,15 @@ chiaki-remaster-rs-win64-portable-*/
 live-test/*.h264
 live-test/*.h265
 data/chiaki-virtualcam.pid
+
+# Internal dev docs / session artifacts (kept locally, not published)
+/HANDOFF.md
+/STATUS.md
+/SETTINGS-AUDIT.md
+/REPO-GITHUB-PLAN.md
+/spike-*.md
+/spike-*.log
+/live-gpu-*
+/fake-gpu-*
+/ui-polish/
+/ui-overlay/
