@@ -8,6 +8,8 @@ live-test/*.h265
 data/chiaki-virtualcam.pid
 
 # Internal dev docs / session artifacts (kept locally, not published)
+/CONVENTIONS.md
+crates/*/CONTRACT-*.md
 /HANDOFF.md
 /STATUS.md
 /SETTINGS-AUDIT.md
