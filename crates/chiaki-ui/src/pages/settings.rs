@@ -1160,19 +1160,19 @@ mod tests {
         assert!(!hidden.keep("upscale"));
     }
 
-    /// Audit-Verdrahtung: SETTINGS-AUDIT.md existiert im Workspace-Root und
-    /// jede Row mit `inactive`-Flag trägt einen Reason-String — der
-    /// `inactive()`-Wrapper setzt ihn immer, Builder-Rows sind per Default
-    /// aktiv (`None`).
+    /// Audit-Verdrahtung: jede Row mit `inactive`-Flag trägt einen
+    /// Reason-String — der `inactive()`-Wrapper setzt ihn immer, Builder-Rows
+    /// sind per Default aktiv (`None`). SETTINGS-AUDIT.md ist eine interne
+    /// Arbeitsdoku und Teil des öffentlichen Repos nicht mehr — existiert
+    /// sie lokal, wird zusätzlich ihre Präsenz geprüft; auf frischen Clones
+    /// (z. B. CI) entfällt dieser Teil.
     #[test]
     fn inactive_rows_have_reason_and_audit_md_exists() {
-        // Audit-Dokument vorhanden (Workspace-Root = ../.. vom ui-Crate).
+        // Audit-Dokument vorhanden (Workspace-Root = ../.. vom ui-Crate)?
         let audit = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../SETTINGS-AUDIT.md");
-        assert!(
-            audit.exists(),
-            "SETTINGS-AUDIT.md fehlt im Workspace-Root: {}",
-            audit.display()
-        );
+        if !audit.exists() {
+            eprintln!("skipped: SETTINGS-AUDIT.md nicht im Workspace-Root (interne Doku)");
+        }
 
         // Aktive Row: kein Flag.
         let active = toggle_row(
