@@ -149,7 +149,27 @@ pub fn run(host: Option<String>, profile: Option<String>) -> Result<(), String> 
     // Kamera VOR der Session öffnen (Fehler → sauber beenden statt still
     // ohne Feed zu laufen — im Headless-Modus ist die Kamera der Zweck).
     // Bei VSR läuft sie im VSR-Output-Format (wie die GUI — User-Vorgabe).
-    let nv_vsr = settings.nv_vsr_enabled();
+    // Verfügbarkeits-Gate wie im GUI-Session-Start (Rust-Erweiterung): ohne
+    // NVIDIA-Treiber/VFX-SDK würde der erzwungene CUDA-Decoder den Feed
+    // komplett scheitern lassen — stattdessen läuft der Headless-Feed ohne
+    // VSR in Stream-Auflösung.
+    let mut nv_vsr = settings.nv_vsr_enabled();
+    if nv_vsr {
+        let cuda = chiaki_media::vsr::cuda_available();
+        let sdk = {
+            let path = settings.nv_vsr_sdk_path();
+            let path = path.trim();
+            chiaki_media::vsr::sdk_dir_resolvable(
+                (!path.is_empty()).then_some(std::path::Path::new(path)),
+            )
+        };
+        if !cuda || !sdk {
+            tracing::warn!(
+                "VSR aktiviert, aber nicht verfügbar (CUDA-Treiber: {cuda}, VFX-SDK: {sdk}) — Headless-Feed läuft ohne VSR"
+            );
+            nv_vsr = false;
+        }
+    }
     let nv_vsr_scale = {
         let raw = settings.nv_vsr_scale().clamp(0, i64::from(u32::MAX)) as u32;
         if (100..=400).contains(&raw) { raw } else { 200 }

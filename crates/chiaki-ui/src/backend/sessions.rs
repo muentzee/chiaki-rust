@@ -894,6 +894,31 @@ impl SessionManager {
         let keyboard = keyboard_mapper_from_settings(&settings);
         let mut media = MediaSettings::from_settings(&request, &settings);
 
+        // VSR-Verfügbarkeits-Gate (Rust-Erweiterung, kennt der C++-Client
+        // nicht): Mit aktiviertem nv_vsr würde der GPU-Pfad unten zwingend
+        // den CUDA-Decoder wählen — auf einer Maschine ohne NVIDIA-Treiber
+        // schlägt der zweimal fehl und die Session hätte gar kein Video
+        // statt nur kein Upscaling (VSR-Init scheitert erst beim ersten
+        // Frame, zu spät für die Decoder-Wahl). Also vor der Entscheidung
+        // CUDA-Treiber + VFX-SDK prüfen und sonst ohne VSR weitermachen.
+        if media.nv_vsr {
+            let cuda = chiaki_media::vsr::cuda_available();
+            let sdk = chiaki_media::vsr::sdk_dir_resolvable(media.nv_vsr_sdk_path.as_deref());
+            if !cuda || !sdk {
+                tracing::warn!(
+                    "VSR aktiviert, aber nicht verfügbar (CUDA-Treiber: {cuda}, VFX-SDK: {sdk}) — Session läuft ohne VSR"
+                );
+                media.nv_vsr = false;
+                self.events.send(UiEvent::Toast(
+                    ToastData::new(ToastKind::Warn, "VSR nicht verfügbar").message(if cuda {
+                        "VFX-SDK nicht gefunden (Settings → Video). Die Session läuft ohne Upscaling."
+                    } else {
+                        "Kein NVIDIA-Treiber (nvcuda.dll) — VSR braucht eine GeForce-RTX-GPU. Die Session läuft ohne Upscaling."
+                    }),
+                ));
+            }
+        }
+
         // GPU-Pfad-Entscheidung (settings/video_output): "gpu" erzwingt,
         // "cpu" verbietet, "auto" = nur bei Zero-Copy-Kombination (VSR→CUDA-
         // Interop oder D3D11VA→Device-interner Copy). Der Sink-Follow-Titel

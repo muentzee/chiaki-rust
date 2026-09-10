@@ -111,6 +111,28 @@ pub fn nv12_output_pitch(out_w: u32) -> usize {
     ((out_w as usize) + 63) & !63
 }
 
+/// Lässt sich der VFX-SDK-Ordner (`NVVideoEffects.dll`) für `sdk_bin_dir`
+/// auflösen? `None` = Auto-Detect (`CHIAKI_VSR_SDK_DIR`,
+/// `<exe>/(../)vfx_sdk/sdk/VideoFX/bin`, NVIDIA-Standardpfad).
+///
+/// App-Ebenen-Erweiterung gegenüber dem 1:1-Port: Session-/Headless-Start
+/// prüfen damit, ob eine aktivierte VSR überhaupt erfüllbar ist. Ohne dieses
+/// Gate verliert eine Nicht-NVIDIA-Maschine mit dem erzwungenen CUDA-Decoder
+/// das komplette Video, statt nur das Upscaling (VSR init scheitert dort
+/// erst beim ersten Frame — zu spät für die Decoder-Wahl).
+pub fn sdk_dir_resolvable(sdk_bin_dir: Option<&Path>) -> bool {
+    VsrUpscaler::resolve_sdk_dir_opt(sdk_bin_dir).is_some()
+}
+
+/// NVIDIA-Treiber mit CUDA-Runtime vorhanden (`nvcuda.dll` ladbar)? Billiger
+/// Verfügbarkeits-Check ohne SDK-/Device-Init — VSR läuft zwingend über CUDA.
+pub fn cuda_available() -> bool {
+    // Kurzzeitiges Laden ist unproblematisch (FreeLibrary beim Drop); nur die
+    // SDK-DLLs werden bewusst geleakt (siehe `load_library`).
+    // SAFETY: Dateiname ist ein konstantes String-Literal.
+    unsafe { libloading::Library::new("nvcuda.dll").is_ok() }
+}
+
 /// CPU-Output-Frame: **kontiguierlicher** NV12-Buffer mit exakt
 /// SDK-kompatiblem Layout (`Y@0 .. pitch*h`, `UV@pitch*h .. pitch*h*1.5`).
 ///
@@ -392,10 +414,16 @@ impl VsrUpscaler {
     /// SDK-Pfad auflösen (C: `loadSdk`-Präambel). Expliziter Pfad ist
     /// autoritativ; sonst `CHIAKI_VSR_SDK_DIR`, sonst Auto-Detect-Kandidaten.
     fn resolve_sdk_dir(&self) -> Option<PathBuf> {
+        Self::resolve_sdk_dir_opt(self.sdk_bin_dir.as_deref())
+    }
+
+    /// Instanzfreie Auflösung — geteilte Logik von [`Self::resolve_sdk_dir`]
+    /// und [`sdk_dir_resolvable`].
+    fn resolve_sdk_dir_opt(sdk_bin_dir: Option<&Path>) -> Option<PathBuf> {
         // C: nicht-leerer sdkBinDir → nur dieser Ordner zählt.
-        if let Some(dir) = &self.sdk_bin_dir {
+        if let Some(dir) = sdk_bin_dir {
             return if dir.join(DLL_NV_VIDEO_EFFECTS).exists() {
-                Some(dir.clone())
+                Some(dir.to_path_buf())
             } else {
                 None
             };
@@ -1529,6 +1557,28 @@ mod tests {
         let mut out = FrameBuf::new();
         assert!(!up.process_frame(&frame, &mut out));
         assert!(!up.is_active());
+    }
+
+    #[test]
+    fn sdk_dir_resolvable_checks_explicit_dir() {
+        // Verfügbarkeits-Gate (App-Ebene): temporärer Ordner ohne DLL →
+        // false, mit (Fake-)NVVideoEffects.dll → true. Der None-Fall
+        // (Auto-Detect) ist maschinenabhängig und wird bewusst nicht
+        // assertet; das Gate short-circuited zuerst über den expliziten
+        // Pfad, bleibt also deterministisch, wo der App-Pfad ihn setzt.
+        let dir = std::env::temp_dir().join(format!("chiaki-vsr-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!sdk_dir_resolvable(Some(dir.as_path())));
+        std::fs::write(dir.join(DLL_NV_VIDEO_EFFECTS), b"not a real dll").unwrap();
+        assert!(sdk_dir_resolvable(Some(dir.as_path())));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore] // braucht NVIDIA-Treiber (nvcuda.dll) — GPU-Maschine
+    fn cuda_available_true_on_nvidia_machine() {
+        assert!(cuda_available());
     }
 
     #[test]

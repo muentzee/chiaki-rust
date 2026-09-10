@@ -387,13 +387,35 @@ pub(crate) fn sections(
     vsr_section.push(text_row(
         "video-nv-vsr-sdk-path",
         "VFX SDK path",
-        Some("Optional. Folder with NVVideoEffects.dll \u{2014} empty = auto-detect"),
+        Some("Optional. Folder containing NVVideoEffects.dll \u{2014} empty = auto-detect"),
         "sdk path dll",
         vsr,
         s.nv_vsr_sdk_path(),
-        "C:\\Program Files\\NVIDIA Corporation\\NVIDIA Video Effects",
+        "C:\\Program Files\\NVIDIA Corporation\\VFXSDK\\VideoFX\\bin",
         focus_for(cx, "video-nv-vsr-sdk-path"),
         |v, s| s.set_nv_vsr_sdk_path(v),
+    ));
+    // Verfügbarkeits-Status (dieselbe Prüfung wie das Session-Gate): der User
+    // soll direkt sehen, WARUM VSR aus bleibt, statt im Stream nur nach dem
+    // fehlenden Badge zu suchen.
+    let vsr_sdk = chiaki_media::vsr::sdk_dir_resolvable({
+        let path = s.nv_vsr_sdk_path();
+        (!path.trim().is_empty()).then_some(std::path::PathBuf::from(path))
+    }
+    .as_deref());
+    let vsr_cuda = chiaki_media::vsr::cuda_available();
+    vsr_section.push(info_row(
+        if !vsr_cuda {
+            "Status: no NVIDIA driver detected (nvcuda.dll) — VSR needs a GeForce \
+             RTX GPU; streams run without upscaling."
+        } else if !vsr_sdk {
+            "Status: VFX SDK not found — unpack the NVIDIA Video Effects SDK next to \
+             chiaki.exe (vfx_sdk/sdk/VideoFX/bin) or set the folder above; streams \
+             run without upscaling."
+        } else {
+            "Status: VSR ready — the stream badge shows the active upscale factor."
+        },
+        "vsr status sdk nvidia ready available",
     ));
     vsr_section.push(toggle_row(
         "video-show-vsr-badge",
