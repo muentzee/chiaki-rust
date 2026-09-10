@@ -18,7 +18,7 @@ members = [
 version = "1.10.0"
 edition = "2021"
 license = "AGPL-3.0-only"
-repository = "https://github.com/muentzee/chiaki-rs"
+repository = "https://github.com/muentzee/chiaki-rust"
 
 [workspace.dependencies]
 chiaki-core = { path = "crates/chiaki-core" }
