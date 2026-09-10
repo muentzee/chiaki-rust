@@ -12,6 +12,11 @@ This is a 1:1 port: the C++ code is treated as the spec — protocol state machi
 
 Everything runs: discovery, registration wizard, LAN streaming (H.264/H.265, 720p–1080p @30/60), PSN remote play over the internet (holepunch/RUDP/UPnP/STUN), DualSense with rumble/adaptive triggers/haptics, microphone, sleep/wake, PIN login, PSN OAuth — plus the two features below that go beyond the C++ client.
 
+## Requirements
+
+- **Windows 10/11 x64** and any DirectX 11 GPU. Hardware decode picks D3D11VA (AMD/Intel/NVIDIA), CUDA (NVIDIA), Vulkan or software, automatically or per setting.
+- Nothing else is required to run the portable release — FFmpeg and Opus DLLs are bundled. **VSR and the virtual camera have extra needs** (see their sections): VSR wants an NVIDIA RTX GPU plus NVIDIA's Video Effects SDK (not redistributable, so not bundled), the virtual camera wants OBS Studio installed once.
+
 ## NVIDIA VSR (RTX Video Super Resolution)
 
 The video path keeps frames GPU-resident end to end: NVDEC CUDA decode → VSR inference → CUDA↔D3D11 interop → swapchain present, with a transparent GPUI overlay window for HUD and dialogs. No per-frame CPU round-trip. The measured media pipeline cost is ~2.2 ms/frame at 1080p→4K VSR 2x on an RTX 4090 (budget: 16.7 ms).
@@ -20,8 +25,8 @@ VSR upscales the stream to up to 4K in real time (auto-targeting the display res
 
 **Setup**
 
-1. You need a GeForce RTX GPU (VSR is RTX-only) with current drivers.
-2. Download the **NVIDIA Video Effects SDK** from NVIDIA and unpack it somewhere.
+1. You need a GeForce RTX GPU (VSR is RTX-only) with current drivers. The driver alone is **not** enough — NVIDIA's VSR runtime for third-party apps ships in the Video Effects SDK, not in the GeForce driver package.
+2. Download the **NVIDIA Video Effects SDK** from the [RTX Video SDK page](https://developer.nvidia.com/rtx-video-sdk) (a free NVIDIA account may be required) and unpack it somewhere.
 3. Point the client at it — any of these works (checked in this order):
    - `Settings → Video → VFX SDK path` (folder containing `NVVideoEffects.dll`)
    - the `CHIAKI_VSR_SDK_DIR` environment variable
@@ -57,7 +62,13 @@ The stream content is fed into the **OBS Virtual Camera**, so Discord, OBS, or a
 
 **Video path (GPU, default):** takion recv → frame processor (FEC) → media thread: NVDEC CUDA decode (raw device frames) → VSR (`process_frame_gpu`) → CUDA→D3D11 interop write into the sink texture → passthrough shader + letterbox → present. Without VSR: D3D11VA decode → GPU-internal copy. CPU fallback path available; frame pacing and vsync are optional per setting.
 
-## Building
+## Releases and building
+
+### Download
+
+Releases carry a **portable zip** (`chiaki-rust-win64-portable-<version>.zip`, built automatically by GitHub Actions on every version tag): unpack anywhere, run `chiaki.exe`, keep the `data/` folder next to it for settings. FFmpeg and Opus DLLs are bundled; the NVIDIA VFX SDK is not (license) — VSR users unpack it themselves (above).
+
+### From source
 
 Windows x64 only. Toolchain is pinned in `rust-toolchain.toml`.
 
@@ -66,7 +77,7 @@ cargo build --release
 cargo test --workspace
 ```
 
-The app loads FFmpeg (avutil-59, avcodec-61, swscale-8, swresample-5), `libopus-0.dll` and — for VSR — the NVIDIA Video Effects SDK DLLs at runtime; place them next to `chiaki.exe` (any FFmpeg 7.1 win64 shared build works). `scripts/build-portable-zip.ps1 -SmokeTest` assembles a fully self-contained portable zip (SDK not included for license reasons — point the setting at your own unpack).
+The app loads FFmpeg (avutil-59, avcodec-61, swscale-8, swresample-5 — any FFmpeg 7.1 win64 *shared* build) and Opus (`opus.dll`/`libopus-0.dll`) next to the exe at runtime. `scripts/build-portable-zip.ps1 -SmokeTest` assembles the portable layout locally.
 
 Tips:
 

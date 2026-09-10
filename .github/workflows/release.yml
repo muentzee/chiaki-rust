@@ -1,0 +1,103 @@
+name: Release
+
+# Builds the portable Windows zip and attaches it to a GitHub Release.
+# Trigger: push a version tag, e.g. `git tag v1.10.0 && git push origin v1.10.0`.
+#
+# Runtime DLLs are fetched/built here and shipped in the zip; the NVIDIA VFX
+# SDK is deliberately NOT included (license) — VSR users unpack it themselves
+# (see README).
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # Frozen FFmpeg 7.1.x shared build (sonames avutil-59/avcodec-61/
+      # swscale-8/swresample-5 — must match chiaki-media's DLL loader).
+      FFMPEG_URL: https://github.com/GyanD/codexffmpeg/releases/download/7.1.1/ffmpeg-7.1.1-full_build-shared.zip
+      FFMPEG_DLLS: avutil-59.dll avcodec-61.dll swscale-8.dll swresample-5.dll
+      OPUS_REF: v1.5.2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release --locked -p chiaki-app
+
+      - name: Download FFmpeg 7.1 shared build
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri $env:FFMPEG_URL -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg
+          # The zip unpacks to ffmpeg/ffmpeg-7.1.1-full_build-shared/ (gyan layout).
+          $bin = "ffmpeg/ffmpeg-7.1.1-full_build-shared/bin"
+          foreach ($dll in $env:FFMPEG_DLLS.Split(' ')) {
+            if (-not (Test-Path "$bin/$dll")) { throw "FFmpeg zip is missing $bin/$dll" }
+            Copy-Item "$bin/$dll" .
+          }
+
+      - name: Build libopus from source
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch $env:OPUS_REF https://github.com/xiph/opus.git
+          cmake -S opus -B opus-build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
+          cmake --build opus-build --config Release
+          if (-not (Test-Path opus-build/Release/opus.dll)) { throw "opus.dll not produced" }
+          Copy-Item opus-build/Release/opus.dll .
+
+      - name: Assemble portable folder
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME -replace '^v', ''
+          $dir = "chiaki-rust-win64-portable-$v"
+          New-Item -ItemType Directory -Force -Path "$dir/data" | Out-Null
+          Copy-Item target/release/chiaki.exe $dir
+          foreach ($dll in $env:FFMPEG_DLLS.Split(' ')) { Copy-Item $dll $dir }
+          Copy-Item opus.dll $dir
+          Copy-Item scripts/portable-data-readme.txt "$dir/data/README.txt"
+          Copy-Item LICENSE $dir
+          New-Item -ItemType Directory -Force -Path "$dir/licenses" | Out-Null
+          Copy-Item ffmpeg/ffmpeg-7.1.1-full_build-shared/LICENSE "$dir/licenses/ffmpeg-license"
+          Copy-Item opus/COPYING "$dir/licenses/opus-license"
+          "portable dir: $dir" | Out-Host
+
+      # Warning-only: a GUI smoke on a runner without a real display is best
+      # effort; the zip must not be blocked by runner quirks.
+      - name: Smoke test (best effort)
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME -replace '^v', ''
+          $dir = "chiaki-rust-win64-portable-$v"
+          $p = Start-Process -FilePath "$dir/chiaki.exe" -WorkingDirectory $dir -PassThru
+          Start-Sleep -Seconds 3
+          $running = -not $p.HasExited
+          if ($running) { Stop-Process -Id $p.Id -Force; $p.WaitForExit() }
+          if (Test-Path "$dir/data/log/chiaki-ui.log") {
+            "smoke OK (running: $running)" | Out-Host
+          } else {
+            "smoke WARNING: no data/log written (running: $running)" | Out-Host
+          }
+
+      - name: Zip
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME -replace '^v', ''
+          $dir = "chiaki-rust-win64-portable-$v"
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          "zip: $dir.zip" | Out-Host
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: chiaki-rust-win64-portable-*.zip
+          generate_release_notes: true
