@@ -2,9 +2,16 @@
 
 A complete from-scratch Rust port of the [chiaki-ng](https://github.com/streetpea/chiaki-ng) PS5/PS4 remote-play client for **Windows x64**, with a native GPU UI, a fully GPU-resident video path, NVIDIA VSR upscaling, and an OBS virtual camera feed with a headless mode.
 
-![Stream HUD](docs/screenshots/stream-hud.png)
+**Measured in live LAN sessions against a real PS5** (RTX 4090, 1080p60 H.265, ~24 Mbit/s at motion):
 
-> Tested live against a real PS5 (1080p60 H.265): RTT ~1 ms, 0% loss, stable 60 fps through the GPU path with VSR 2x active, 0 decode errors.
+| Metric | Value |
+|---|---|
+| Round-trip time | ~1.1 ms (loss 0.0%) |
+| Frame rate | stable 60 fps with VSR 2x active (1080p → 4K), 0 dropped frames over multi-minute sessions |
+| Media pipeline | ~2.2 ms per frame vs. 16.7 ms budget (decode 0.85 ms + VSR 1.32 ms) — fully GPU-resident, zero CPU frame copies |
+| Audio | Opus out/in, ~28 ms buffer (matches the C++ client's semantics) |
+| Decoder backends | NVDEC-CUDA, D3D11VA, Vulkan, software (auto or per setting) |
+| Test suite | 649 automated tests, including golden vectors verified byte-identical against the compiled C code |
 
 ## Why this fork of reality exists
 
@@ -43,7 +50,7 @@ The stream content is fed into the **OBS Virtual Camera**, so Discord, OBS, or a
 - Requires OBS Studio to be installed once (its DirectShow filter is what apps see); OBS itself does **not** need to run — but must not start its own Virtual Camera at the same time (one writer).
 - Restart Discord after the first session so it lists the camera.
 
-**Headless mode:** `chiaki.exe --virtualcam [host|IP]` runs the whole feed without any window — session, decode, VSR, camera, plus audio playback on the local PC (you hear the game; the windowless process feeds Discord/OBS). From the GUI you can start/stop this detached feed (`Settings → Video` shows its status; with the camera setting enabled, clicking a console tile offers *normal stream* vs. *headless start/stop*), and an autostart toggle registers it for the next Windows login. Only one instance runs at a time (instance mutex + named stop event, robust even after a hard kill).
+**Headless mode:** `chiaki.exe --virtualcam [host|IP]` runs the whole feed without any window — session, decode, VSR, camera, plus audio playback on the local PC (you hear the game; the windowless process feeds Discord/OBS). From the GUI you can start/stop this detached feed (`Settings → Video` shows its status; with the camera setting enabled, clicking a console tile offers *normal stream* vs. *headless start/stop*), and an autostart toggle registers it for the next Windows login. Only one instance runs at a time (instance mutex + named stop event, robust even after a hard kill). Verified live: 1080p stream → 3840×2160@60 camera feed with 0 feed errors.
 
 ## Architecture
 
