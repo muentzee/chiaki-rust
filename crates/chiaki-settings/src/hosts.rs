@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn hostmac_hex_string() {
-        let mac = HostMac::new([0xd4, 0xf7, 0xd5, 0x11, 0xfa, 0x45]);
+        let mac = HostMac::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
         assert_eq!(mac.to_hex_string(), "aabbccddeeff");
         assert_eq!(HostMac::from_slice(&[1, 2, 3]), None);
     }
