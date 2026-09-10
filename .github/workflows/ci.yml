@@ -17,5 +17,26 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The DLL-dependent chiaki-media tests run against the exact runtime
+      # DLLs we ship in releases: a frozen FFmpeg 7.1 shared build and opus
+      # built from source. The VFX SDK is not provisioned (license) — its
+      # test skips cleanly.
+      - name: Provision FFmpeg DLLs
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/GyanD/codexffmpeg/releases/download/7.1.1/ffmpeg-7.1.1-full_build-shared.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg
+          "CHIAKI_FFMPEG_DIR=$PWD/ffmpeg/ffmpeg-7.1.1-full_build-shared/bin" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Build libopus from source
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v1.5.2 https://github.com/xiph/opus.git
+          cmake -S opus -B opus-build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON
+          cmake --build opus-build --config Release
+          New-Item -ItemType Directory -Force -Path opus-bin | Out-Null
+          Copy-Item opus-build/Release/opus.dll opus-bin
+          "CHIAKI_OPUS_DIR=$PWD/opus-bin" | Out-File -Append $env:GITHUB_ENV
+
       - name: Test
         run: cargo test --workspace --locked
