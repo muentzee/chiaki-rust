@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "chiaki-app"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "chiaki-core",
  "chiaki-input",
@@ -1040,7 +1040,7 @@ dependencies = [
 
 [[package]]
 name = "chiaki-cli"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "chiaki-core",
  "chiaki-media",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "chiaki-core"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "aes",
  "base64",
@@ -1085,7 +1085,7 @@ dependencies = [
 
 [[package]]
 name = "chiaki-input"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "chiaki-core",
  "gilrs",
@@ -1100,7 +1100,7 @@ dependencies = [
 
 [[package]]
 name = "chiaki-media"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "bytes",
  "chiaki-core",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "chiaki-remote"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "base64",
  "chiaki-core",
@@ -1136,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "chiaki-render"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "chiaki-core",
  "chiaki-media",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "chiaki-settings"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "base64",
  "rust-ini",
@@ -1162,7 +1162,7 @@ dependencies = [
 
 [[package]]
 name = "chiaki-steam"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "thiserror 2.0.20",
  "tracing",
@@ -1171,7 +1171,7 @@ dependencies = [
 
 [[package]]
 name = "chiaki-ui"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "chiaki-core",
  "chiaki-input",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "chiaki-virtualcam"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "chiaki-settings",
  "thiserror 2.0.20",
