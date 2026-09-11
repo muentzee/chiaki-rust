@@ -34,3 +34,6 @@ ctrlc = "3"
 # (SetPriorityClass, Win32_System_Threading — Features kommen aus der
 # Workspace-Dep, dort nur Ergänzungen, keine Entfernung).
 windows.workspace = true
+
+[build-dependencies]
+winresource = "0.1"

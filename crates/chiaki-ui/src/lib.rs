@@ -109,11 +109,53 @@ pub fn run(profile: Option<String>) -> gpui::Result<()> {
         )
         .expect("Hauptfenster konnte nicht geöffnet werden");
 
+        // Fenster-/Taskbar-Icon (ui-v3-Logo) — gpui 0.2.2 hat kein
+        // window-icon-API, klassisch über WM_SETICON auf das HWND.
+        set_window_icon();
+
         // Backend-Event-Loop: pollt die UiEventQueue und notifyt die Shell.
         spawn_backend_event_loop(shell.downgrade(), cx);
     });
 
     Ok(())
+}
+
+/// Setzt das Fenster-/Taskbar-Icon aus dem eingebetteten Prototyp-Logo
+/// (Multi-Size-ICO). Fehler werden bewusst nur geloggt — ein fehlendes Icon
+/// darf die App nicht killen.
+fn set_window_icon() {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateIconFromResourceEx, FindWindowW, SendMessageW, ICON_BIG, ICON_SMALL,
+        WM_SETICON,
+    };
+
+    const ICON_FILE: &[u8] = include_bytes!("../assets/logo.ico");
+    const LR_DEFAULTCOLOR: u32 = 0x0000_0000;
+
+    let result = (|| -> windows::core::Result<()> {
+        use windows::Win32::UI::WindowsAndMessaging::IMAGE_FLAGS;
+        unsafe {
+            let hwnd = FindWindowW(None, windows::core::w!("Chiaki Remaster"))?;
+            if hwnd.is_invalid() {
+                return Err(windows::core::Error::from_win32());
+            }
+            let hicon = CreateIconFromResourceEx(
+                ICON_FILE,
+                true,
+                0x0003_0000,
+                0,
+                0,
+                IMAGE_FLAGS(LR_DEFAULTCOLOR),
+            )?;
+            SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_SMALL as usize), LPARAM(hicon.0 as isize));
+            SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(hicon.0 as isize));
+            Ok(())
+        }
+    })();
+    if let Err(err) = result {
+        tracing::debug!("Fenster-Icon nicht gesetzt: {err}");
+    }
 }
 
 /// Backend-Event-Loop: tickt alle 100 ms, leert die UiEventQueue der Shell

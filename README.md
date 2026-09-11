@@ -2,6 +2,8 @@
 
 A complete from-scratch Rust port of the [chiaki-ng](https://github.com/streetpea/chiaki-ng) PS5/PS4 remote-play client for **Windows x64**, with a native GPU UI, a fully GPU-resident video path, NVIDIA VSR upscaling, and an OBS virtual camera feed with a headless mode.
 
+![Home](docs/screenshots/home.png)
+
 > **Work in progress:** I develop this in my spare time and keep shipping improvements — expect regular updates and the occasional rough edge.
 
 **Measured in live LAN sessions against a real PS5** (RTX 4090, 1080p60 H.265, ~24 Mbit/s at motion):

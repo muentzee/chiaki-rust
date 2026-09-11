@@ -16,7 +16,10 @@ pub mod regist_wizard;
 pub mod settings;
 pub mod stream;
 
-use gpui::{div, px, Context, IntoElement as _, ParentElement as _, Styled};
+use gpui::{
+    div, px, Context, InteractiveElement as _, IntoElement as _, ParentElement as _, Styled,
+    StatefulInteractiveElement as _,
+};
 
 use crate::app::AppShell;
 use crate::theme;
@@ -36,7 +39,7 @@ pub(crate) fn page_header(
         .gap_1()
         .child(
             div()
-                .text_size(px(theme::SIZE_DISPLAY))
+                .text_size(px(theme::SIZE_HERO))
                 .font_weight(gpui::FontWeight(theme::WEIGHT_DISPLAY))
                 .text_color(theme::TEXT_PRIMARY)
                 .child(title.to_string()),
@@ -47,14 +50,28 @@ pub(crate) fn page_header(
         .into_any_element()
 }
 
-/// Standard-Seitenrahmen: Padding + vertikale Anordnung.
+/// Standard-Seitenrahmen: Padding + vertikale Anordnung; bei Überlauf
+/// scrollbar (ui-v3 — Inhalte dürfen nie abgeschnitten enden). Der
+/// Scroll-Container ist bewusst NICHT selbst Flex: `flex_1`-Kinder (Cards)
+/// würden sonst auf Viewport-Höhe aufgestreckt statt sich am Inhalt zu
+/// orientieren.
 pub(crate) fn page_scaffold(children: Vec<gpui::AnyElement>) -> gpui::AnyElement {
     div()
+        .id("page-scaffold")
         .size_full()
-        .flex()
-        .flex_col()
-        .gap(px(theme::SP_5))
-        .p(px(theme::SP_6))
-        .children(children)
+        .overflow_y_scroll()
+        // items_start: gpui-Divs sind per Default Flex — ohne diese
+        // Ausrichtung würde das einziger Kind (und damit Cards mit
+        // flex_1) auf Viewport-Höhe aufgestreckt.
+        .items_start()
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(theme::SP_5))
+                .p(px(theme::SP_6))
+                .children(children),
+        )
         .into_any_element()
 }

@@ -15,8 +15,7 @@ use chiaki_settings::hosts::{HostMac, ManualHost};
 
 use crate::app::AppShell;
 use crate::components::{
-    Button, ButtonVariant, Card, EmptyState, SectionLabel, StatusKind, TextField, ToastData,
-    ToastKind,
+    Button, ButtonVariant, Card, EmptyState, StatusKind, TextField, ToastData, ToastKind,
 };
 use crate::icons;
 use crate::pages::home::{console_entries, console_tile, ConsoleEntry};
@@ -171,8 +170,35 @@ pub fn page(
 
     // Manueller Host (C++: ManualHostLayer — die Adresse reicht; die
     // Verknüpfung mit einem registrierten Host macht der Registrierungs-
-    // erfolg wie im C++ `QmlRegist::success`-Pfad).
-    children.push(SectionLabel::new("Manual host").into_any_element());
+    // erfolg wie im C++ `QmlRegist::success`-Pfad). Header im ui-v3-Stil
+    // (Icon + Titel + Beschreibung) wie „Quick Actions“ auf Home.
+    children.push(
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(icons::icon(icons::paths::NETWORK, 16.0, theme::ACCENT_SOFT))
+                    .child(
+                        div()
+                            .text_size(px(theme::SIZE_TITLE))
+                            .font_weight(FontWeight(theme::WEIGHT_TITLE))
+                            .text_color(theme::TEXT_PRIMARY)
+                            .child("Manual Host"),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::SIZE_CAPTION))
+                    .text_color(theme::TEXT_SECONDARY)
+                    .child("Connect directly using an IP address."),
+            )
+            .into_any_element(),
+    );
     children.push(
         Card::new("manual-host-card")
             .child(
@@ -182,26 +208,6 @@ pub fn page(
                     .justify_between()
                     .flex_wrap()
                     .gap_3()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_size(px(theme::SIZE_BODY))
-                                    .text_color(theme::TEXT_PRIMARY)
-                                    .child("Add manual host"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(theme::SIZE_CAPTION))
-                                    .text_color(theme::TEXT_SECONDARY)
-                                    .child(
-                                        "IP or hostname of a console that is not found by discovery.",
-                                    ),
-                            ),
-                    )
                     .child(manual_host_field(shell, window, cx)),
             )
             .into_any_element(),

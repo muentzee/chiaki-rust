@@ -12,17 +12,21 @@
 use gpui::Hsla;
 
 // ---------------------------------------------------------------------------
-// Farb-Tokens (ui-v2-spec §1 Brand + §3)
+// Farb-Tokens (ui-v3 Redesign nach UI-Prototype, 09/2026)
 // ---------------------------------------------------------------------------
 
-/// Grundton `#0B0D12` — App-Hintergrund.
-pub const BG: Hsla = Hsla { h: 0.619, s: 0.2414, l: 0.0569, a: 1.0 };
-/// Fläche `#14171F` — Karten/Rail.
-pub const SURFACE: Hsla = Hsla { h: 0.6212, s: 0.2157, l: 0.1, a: 1.0 };
-/// Fläche 2 `#1B202B` — Hover/Elevated/Input-Felder.
-pub const SURFACE2: Hsla = Hsla { h: 0.6146, s: 0.2286, l: 0.1373, a: 1.0 };
-/// Akzent `#7C5CFF` (Violett) — primäre Aktionen, Fokusring.
-pub const ACCENT: Hsla = Hsla { h: 0.6994, s: 1.0, l: 0.6804, a: 1.0 };
+/// Grundton `#070A12` — App-Hintergrund (dunkles Navy).
+pub const BG: Hsla = Hsla { h: 0.6212, s: 0.44, l: 0.049, a: 1.0 };
+/// Sidebar `#05070D` — noch dunkler als BG.
+pub const SIDEBAR: Hsla = Hsla { h: 0.625, s: 0.4447, l: 0.0353, a: 1.0 };
+/// Fläche `#0D1120` — Karten.
+pub const SURFACE: Hsla = Hsla { h: 0.6316, s: 0.4224, l: 0.0882, a: 1.0 };
+/// Fläche 2 `#151B2E` — Hover/Elevated/Input-Felder.
+pub const SURFACE2: Hsla = Hsla { h: 0.6267, s: 0.3729, l: 0.1314, a: 1.0 };
+/// Akzent `#3D6BFF` (Blau) — primäre Aktionen, Fokusring, aktive Nav-Pills.
+pub const ACCENT: Hsla = Hsla { h: 0.6272, s: 1.0, l: 0.6196, a: 1.0 };
+/// Akzent hell `#6E9BFF` — Gradient-Ende, weiche Fills, Icon-Tiles.
+pub const ACCENT_SOFT: Hsla = Hsla { h: 0.6149, s: 1.0, l: 0.7157, a: 1.0 };
 /// Text `#EAECF2`.
 pub const TEXT_PRIMARY: Hsla = Hsla { h: 0.625, s: 0.2353, l: 0.9333, a: 1.0 };
 /// Text sekundär `#98A1B3`.
@@ -43,11 +47,11 @@ pub const HAIRLINE: Hsla = Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.06 };
 /// Kontur (8 % Weiß) — Glas-Layer, Hover-Konturen.
 pub const OUTLINE: Hsla = Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.08 };
 
-/// Glas `#0B0D12` @ 78 % — HUD-/Overlay-Layer.
-pub const GLASS: Hsla = Hsla { h: 0.619, s: 0.2414, l: 0.0569, a: 0.78 };
+/// Glas — BG @ 78 % — HUD-/Overlay-Layer.
+pub const GLASS: Hsla = Hsla { h: 0.6212, s: 0.44, l: 0.049, a: 0.78 };
 
 /// Dim-Backdrop für Modals (BG @ 60 %).
-pub const BACKDROP: Hsla = Hsla { h: 0.619, s: 0.2414, l: 0.0569, a: 0.6 };
+pub const BACKDROP: Hsla = Hsla { h: 0.6212, s: 0.44, l: 0.049, a: 0.6 };
 
 // --- abgeleitete Interaktions-Farben (aus den Basis-Tokens) ----------------
 
@@ -64,12 +68,16 @@ pub fn accent_pressed() -> Hsla {
 
 /// [`BG`]
 pub fn bg() -> Hsla { BG }
+/// [`SIDEBAR`]
+pub fn sidebar() -> Hsla { SIDEBAR }
 /// [`SURFACE`]
 pub fn surface() -> Hsla { SURFACE }
 /// [`SURFACE2`]
 pub fn surface2() -> Hsla { SURFACE2 }
 /// [`ACCENT`]
 pub fn accent() -> Hsla { ACCENT }
+/// [`ACCENT_SOFT`]
+pub fn accent_soft() -> Hsla { ACCENT_SOFT }
 /// [`TEXT_PRIMARY`]
 pub fn text_primary() -> Hsla { TEXT_PRIMARY }
 /// [`TEXT_SECONDARY`]
@@ -113,6 +121,7 @@ pub const SP_5: f32 = 24.0;
 pub const SP_6: f32 = 32.0;
 
 /// Typo-Skala: Größen in px.
+pub const SIZE_HERO: f32 = 38.0; // 700 — Seiten-Hero ("Home")
 pub const SIZE_DISPLAY: f32 = 30.0; // 700
 pub const SIZE_TITLE: f32 = 20.0; // 600
 pub const SIZE_HEADLINE: f32 = 16.0; // 600
@@ -207,10 +216,12 @@ mod tests {
 
     #[test]
     fn farb_tokens_matchen_die_spec() {
-        assert_hex("BG", BG, 0x0B0D12);
-        assert_hex("SURFACE", SURFACE, 0x14171F);
-        assert_hex("SURFACE2", SURFACE2, 0x1B202B);
-        assert_hex("ACCENT", ACCENT, 0x7C5CFF);
+        assert_hex("BG", BG, 0x070A12);
+        assert_hex("SIDEBAR", SIDEBAR, 0x05070D);
+        assert_hex("SURFACE", SURFACE, 0x0D1120);
+        assert_hex("SURFACE2", SURFACE2, 0x151B2E);
+        assert_hex("ACCENT", ACCENT, 0x3D6BFF);
+        assert_hex("ACCENT_SOFT", ACCENT_SOFT, 0x6E9BFF);
         assert_hex("TEXT_PRIMARY", TEXT_PRIMARY, 0xEAECF2);
         assert_hex("TEXT_SECONDARY", TEXT_SECONDARY, 0x98A1B3);
         assert_hex("TEXT_DISABLED", TEXT_DISABLED, 0x5A6272);

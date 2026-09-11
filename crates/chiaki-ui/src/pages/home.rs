@@ -16,7 +16,7 @@
 
 use gpui::{
     div, px, Context, FocusHandle, FontWeight, IntoElement, InteractiveElement as _, MouseButton,
-    ParentElement as _, Styled, Window,
+    ParentElement as _, StatefulInteractiveElement as _, Styled, StyledImage as _, Window,
 };
 
 use chiaki_settings::hosts::{HostMac, ManualHost, RegisteredHost};
@@ -29,7 +29,7 @@ use crate::components::{
 };
 use crate::icons;
 use crate::pages::regist_wizard;
-use crate::pages::{page_header, page_scaffold};
+use crate::pages::page_scaffold;
 use crate::theme;
 
 // ---------------------------------------------------------------------------
@@ -521,7 +521,7 @@ pub(crate) fn open_host_menu(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mu
         let weak = cx.entity().downgrade();
         let delete_entry = entry.clone();
         dialog = dialog.button(
-            DialogButton::new("Delete registration …", ButtonVariant::Danger).action(
+            DialogButton::new("Delete", ButtonVariant::Danger).action(
                 move |_window, cx| {
                     let _ = weak.update(cx, |shell, cx| {
                         open_delete_confirm(shell, &delete_entry, cx)
@@ -570,7 +570,7 @@ fn open_delete_confirm(shell: &mut AppShell, entry: &ConsoleEntry, cx: &mut Cont
 }
 
 // ---------------------------------------------------------------------------
-// Geteilte Kachel (240×140, Spec §2.1)
+// Geteilte Kachel (ui-v3: Karte mit PS5-Render, 290×150)
 // ---------------------------------------------------------------------------
 
 /// Konsolen-Kachel: Klick = Verbinden, Rechtsklick = Kontextmenü.
@@ -585,50 +585,68 @@ pub(crate) fn console_tile(
     let click_entry = entry.clone();
     let menu_entry = entry.clone();
 
-    // Fixe Kachelgröße außen (Card wächst via flex_1 → füllt den Rahmen).
+    // Fixe Kachelgröße außen (Inhalt füllt den Rahmen über size_full).
     div()
-        .w(px(240.0))
-        .h(px(140.0))
+        .w(px(290.0))
+        .h(px(150.0))
         .flex_none()
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |shell, _ev, _window, cx| open_host_menu(shell, &menu_entry, cx)),
         )
         .child(
-            Card::new(("tile", i))
-                .focus_handle(focus)
+            div()
+                .id(("tile", i))
+                .flex()
+                .items_center()
+                .gap(px(theme::SP_4))
+                .size_full()
+                .p(px(theme::SP_4))
+                .rounded(px(theme::RADIUS_LG))
+                .bg(theme::SURFACE)
+                .border_1()
+                .border_color(theme::HAIRLINE)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::SURFACE2))
+                .track_focus(&focus)
+                .focus(|s| s.border_2().border_color(theme::ACCENT))
                 .on_click(cx.listener(move |shell, _ev, _window, cx| {
                     connect_entry(shell, &click_entry, cx)
                 }))
+                // PS5-Render (Prototyp-Asset, identisch zur Hero-Karte).
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(icons::icon(icons::paths::CONSOLE, 26.0, theme::ACCENT))
-                        .child(StatusBadge::new(entry.status).label(entry.status_label)),
-                )
-                .child(
-                    div()
-                        // Feste 240-px-Kachel: lange Konsolennamen bekommen
-                        // eine Ellipse statt eines hässlichen Wortumbruchs.
-                        .truncate()
-                        .text_size(px(theme::SIZE_HEADLINE))
-                        .font_weight(FontWeight(theme::WEIGHT_HEADLINE))
-                        .text_color(theme::TEXT_PRIMARY)
-                        .child(entry.name.clone()),
+                    gpui::img(icons::image_paths::PS5)
+                        .w(px(78.0))
+                        .h(px(112.0))
+                        .flex_none()
+                        .object_fit(gpui::ObjectFit::Contain),
                 )
                 .child(
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(theme::SP_1))
+                        .gap_2()
+                        .flex_1()
                         .min_w_0()
+                        .child(
+                            div().flex().flex_row().child(
+                                StatusBadge::new(entry.status).label(entry.status_label),
+                            ),
+                        )
                         .child(
                             div()
                                 // gpui-0.2.2-Quirk: `text_ellipsis` ellipsiert in
                                 // verschachtelten Flex-Spalten bereits bei kurzen
                                 // Texten — deshalb hier nur Clip + Einzeilig.
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(theme::SIZE_HEADLINE))
+                                .font_weight(FontWeight(theme::WEIGHT_HEADLINE))
+                                .text_color(theme::TEXT_PRIMARY)
+                                .child(entry.name.clone()),
+                        )
+                        .child(
+                            div()
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_size(px(theme::SIZE_CAPTION))
@@ -666,78 +684,170 @@ pub(crate) fn console_tile(
 
 pub fn page(
     shell: &mut AppShell,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut Context<AppShell>,
 ) -> impl IntoElement {
-    let entries = console_entries(shell);
-    let focus_handles = shell.regist_wizard.sync_tile_focus(entries.len(), cx);
+    let query = shell.home_search.to_lowercase();
+    let all_entries = console_entries(shell);
+    let entries: Vec<ConsoleEntry> = if query.is_empty() {
+        all_entries
+    } else {
+        all_entries
+            .into_iter()
+            .filter(|e| {
+                e.name.to_lowercase().contains(&query) || e.addr.to_lowercase().contains(&query)
+            })
+            .collect()
+    };
+    let focus_handles = shell.regist_wizard.sync_tile_focus(entries.len().max(1), cx);
     let ui_focus = shell.regist_wizard.sync_ui_focus(4, cx);
 
     let mut children: Vec<gpui::AnyElement> = Vec::new();
-    children.push(page_header(shell, "Home", Some("Welcome back"), window, cx));
+
+    // Topbar-Zeile: Suche rechts (ui-v3-Prototyp).
+    children.push(
+        div()
+            .flex()
+            .justify_end()
+            .child(
+                crate::components::TextField::new("home-search")
+                    .placeholder("Search consoles…")
+                    .value(shell.home_search.clone())
+                    .width(280.0)
+                    .focus_handle(shell.home_search_focus.clone())
+                    .on_change(cx.listener(|shell, value: &gpui::SharedString, _w, cx| {
+                        shell.home_search = value.to_string();
+                        cx.notify();
+                    })),
+            )
+            .into_any_element(),
+    );
+
+    // Hero-Header: große Typo + Untertitel.
+    children.push(
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(theme::SIZE_HERO))
+                    .font_weight(FontWeight(theme::WEIGHT_DISPLAY))
+                    .text_color(theme::TEXT_PRIMARY)
+                    .child("Home"),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::SIZE_BODY))
+                    .text_color(theme::TEXT_SECONDARY)
+                    .child("Welcome back! Your games are closer than you think."),
+            )
+            .into_any_element(),
+    );
 
     if entries.is_empty() {
-        // Leerzustand (Erststart): Willkommens-Fluss statt leerer Liste.
-        children.push(
-            Card::new("home-empty")
-                .hero()
-                .child(
-                    EmptyState::new(
-                        icons::paths::CONSOLE,
-                        "Welcome to Chiaki Remaster",
-                        "Register your first console to start streaming.\n\
-                         The console and this computer must be on the same network.",
+        // Leerzustand: entweder Erststart (keine Konsolen) oder Suchfilter
+        // ohne Treffer.
+        if query.is_empty() {
+            children.push(
+                Card::new("home-empty")
+                    .hero()
+                    .child(
+                        EmptyState::new(
+                            icons::paths::CONSOLE,
+                            "Welcome to Chiaki Remaster",
+                            "Register your first console to start streaming.\n\
+                             The console and this computer must be on the same network.",
+                        )
+                        .action(
+                            Button::new("home-welcome-regist", "Register console")
+                                .variant(ButtonVariant::Primary)
+                                .on_click(cx.listener(|shell, _ev, _window, cx| {
+                                    regist_wizard::open(shell, cx);
+                                    shell.navigate(Route::Consoles, cx);
+                                })),
+                        ),
                     )
-                    .action(
-                        Button::new("home-welcome-regist", "Register console")
-                            .variant(ButtonVariant::Primary)
-                            .on_click(cx.listener(|shell, _ev, _window, cx| {
-                                // Wizard ist Overlay der Konsolen-Seite
-                                // (CONTRACT-UI §4) → dorthin navigieren.
-                                regist_wizard::open(shell, cx);
-                                shell.navigate(Route::Consoles, cx);
-                            })),
-                    ),
+                    .into_any_element(),
+            );
+        } else {
+            children.push(
+                Card::new("home-search-empty")
+                    .child(
+                        EmptyState::new(
+                            icons::paths::SEARCH,
+                            "No matches",
+                            format!("No console matches \"{query}\"."),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
+    } else {
+        // Hero (ui-v3): die erste Konsole als große Karte mit Render.
+        children.push(
+            hero_card(0, &entries[0], ui_focus[0].clone(), cx).into_any_element(),
+        );
+
+        // Restliche Konsolen als Kacheln (entfällt, wenn nur der Hero da ist).
+        if entries.len() > 1 {
+            children.push(SectionLabel::new("Your consoles").into_any_element());
+            children.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(px(theme::SP_4))
+                    .children(entries.iter().enumerate().skip(1).map(|(i, entry)| {
+                        console_tile(i, entry, focus_handles[i].clone(), shell, cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
+
+        // Schnellaktionen (ui-v3: Karten mit Icon-Tile + Chevron).
+        children.push(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(icons::icon(icons::paths::PULSE, 16.0, theme::ACCENT_SOFT))
+                        .child(
+                            div()
+                                .text_size(px(theme::SIZE_TITLE))
+                                .font_weight(FontWeight(theme::WEIGHT_TITLE))
+                                .text_color(theme::TEXT_PRIMARY)
+                                .child("Quick Actions"),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::SIZE_CAPTION))
+                        .text_color(theme::TEXT_SECONDARY)
+                        .child("Get started or manage your remote play setup."),
                 )
                 .into_any_element(),
         );
-    } else {
-        // Hero (nur ab 2 Konsolen — bei einer wäre es die Doppelanzeige der
-        // Kachel, siehe Moduldoku): zuletzt verbunden = auto_connect_mac.
-        if entries.len() > 1 {
-            if let Some((hero_index, hero)) = hero_entry(shell, &entries) {
-                children.push(
-                    hero_card(hero_index, hero, ui_focus[0].clone(), cx).into_any_element(),
-                );
-            }
-        }
-
-        // Reihe „Deine Konsolen“.
-        children.push(SectionLabel::new("Your consoles").into_any_element());
         children.push(
             div()
                 .flex()
                 .flex_row()
                 .flex_wrap()
                 .gap(px(theme::SP_4))
-                .children(entries.iter().enumerate().map(|(i, entry)| {
-                    console_tile(i, entry, focus_handles[i].clone(), shell, cx)
-                }))
-                .into_any_element(),
-        );
-
-        // Schnellaktionen (schmale Zeile, Spec §2.1).
-        children.push(SectionLabel::new("Quick actions").into_any_element());
-        children.push(
-            div()
-                .flex()
-                .flex_row()
-                .flex_wrap()
-                .gap_2()
                 .child(
-                    Button::new("qa-psn", "Set up PSN Remote Play")
-                        .focus_handle(ui_focus[1].clone())
-                        .on_click(cx.listener(|shell, _ev, _window, _cx| {
+                    action_card(
+                        "qa-psn",
+                        icons::paths::LINK,
+                        "Set up PSN Remote Play",
+                        "Guide to enable remote play\non your PS5.",
+                        true,
+                        ui_focus[1].clone(),
+                        cx.listener(|shell, _ev, _window, _cx| {
                             // Gleicher PSN-Login-Flow wie Settings/Info
                             // (psn_login.rs): Tokens + Account-ID in den
                             // Settings, Feedback als Toast-UiEvent.
@@ -745,27 +855,45 @@ pub fn page(
                                 shell.backend.settings().clone(),
                                 shell.backend.event_sender(),
                             );
-                        })),
+                        }),
+                    )
+                    .into_any_element(),
                 )
                 .child(
-                    Button::new("qa-regist", "Register console")
-                        .focus_handle(ui_focus[2].clone())
-                        .on_click(cx.listener(|shell, _ev, _window, cx| {
-                            // Wizard ist Overlay der Konsolen-Seite.
+                    action_card(
+                        "qa-regist",
+                        icons::paths::USER_PLUS,
+                        "Register Console",
+                        "Add your PS5 with an\nactivation code.",
+                        false,
+                        ui_focus[2].clone(),
+                        cx.listener(|shell, _ev, _window, cx| {
                             regist_wizard::open(shell, cx);
                             shell.navigate(Route::Consoles, cx);
-                        })),
+                        }),
+                    )
+                    .into_any_element(),
                 )
                 .child(
-                    Button::new("qa-manual", "Add manual host")
-                        .focus_handle(ui_focus[3].clone())
-                        .on_click(cx.listener(|shell, _ev, _window, cx| {
+                    action_card(
+                        "qa-manual",
+                        icons::paths::NETWORK,
+                        "Add Manual Host",
+                        "Connect directly using\nIP address.",
+                        false,
+                        ui_focus[3].clone(),
+                        cx.listener(|shell, _ev, _window, cx| {
                             shell.regist_wizard.manual_focus_pending = true;
                             shell.navigate(Route::Consoles, cx);
-                        })),
+                        }),
+                    )
+                    .into_any_element(),
                 )
                 .into_any_element(),
         );
+
+        // Recent Sessions + Tips (ui-v3-Zweierreihe).
+        children.push(sessions_and_tips_row().into_any_element());
     }
 
     // Status-/Tipp-Zeile (wie HomePage.qml-Footer).
@@ -787,87 +915,353 @@ pub fn page(
     page_scaffold(children)
 }
 
-/// Hero-Host: MAC-Abgleich mit `auto_connect_mac` (Proxy für „zuletzt
-/// verbunden“), sonst der erste Host — wie HomePage.qml.
-fn hero_entry<'a>(
-    shell: &AppShell,
-    entries: &'a [ConsoleEntry],
-) -> Option<(usize, &'a ConsoleEntry)> {
-    let auto_mac = shell
-        .backend
-        .settings()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .auto_connect_host()
-        .server_mac;
-    let auto = *auto_mac.mac();
-    let by_mac = entries
-        .iter()
-        .enumerate()
-        .find(|(_, e)| e.mac == Some(auto) && e.registered.is_some());
-    by_mac.or_else(|| entries.first().map(|e| (0usize, e)))
+/// Aktions-Karte (ui-v3): Icon-Tile, Titel, Beschreibung, Chevron rechts;
+/// `primary` bekommt den Akzent-Rahmen. Der Klick-Handler kommt als
+/// gpui-Rohhandler (typischerweise `cx.listener(...)`).
+#[allow(clippy::too_many_arguments)]
+fn action_card(
+    id: &'static str,
+    icon: &'static str,
+    title: &str,
+    desc: &str,
+    primary: bool,
+    focus: FocusHandle,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> gpui::AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(theme::SP_4))
+        .w(px(300.0))
+        .p(px(theme::SP_4))
+        .rounded(px(theme::RADIUS_LG))
+        .bg(theme::SURFACE)
+        .border_1()
+        .border_color(if primary { theme::ACCENT } else { theme::HAIRLINE })
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::SURFACE2))
+        .track_focus(&focus)
+        .on_click(on_click)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(44.0))
+                .rounded(px(theme::RADIUS_MD))
+                .bg(theme::SURFACE2)
+                .border_1()
+                .border_color(theme::HAIRLINE)
+                .child(icons::icon(icon, 20.0, theme::ACCENT_SOFT)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(theme::SIZE_HEADLINE))
+                        .font_weight(FontWeight(theme::WEIGHT_HEADLINE))
+                        .text_color(theme::TEXT_PRIMARY)
+                        .child(title.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::SIZE_CAPTION))
+                        .text_color(theme::TEXT_SECONDARY)
+                        .child(desc.to_string()),
+                ),
+        )
+        .child(icons::icon(icons::paths::CHEVRON_RIGHT, 16.0, theme::TEXT_SECONDARY))
+        .into_any_element()
 }
 
-/// Hero-Karte (Spec §2.1): großer Name, Live-Status, „Verbinden“-Primary.
-/// Der Live-Status kommt aus den Discovery-Events: HostFound/HostsChanged
-/// notifyen die Shell (app.rs) → Kachel/Hero rendern den aktuellen Zustand.
+/// Zweierreihe „Recent Sessions“ + „Tips & Guides“ (ui-v3).
+fn sessions_and_tips_row() -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .gap(px(theme::SP_4))
+        // Recent Sessions: leerer Zustand mit gestrichelter Andeutung —
+        // eine Sitzungshistorie existiert (noch) nicht als Feature.
+        .child(
+            div().flex_1().min_w_0().child(
+                Card::new("recent-sessions")
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(icons::icon(icons::paths::CLOCK, 16.0, theme::ACCENT_SOFT))
+                            .child(
+                                div()
+                                    .text_size(px(theme::SIZE_HEADLINE))
+                                    .font_weight(FontWeight(theme::WEIGHT_HEADLINE))
+                                    .text_color(theme::TEXT_PRIMARY)
+                                    .child("Recent Sessions"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap_2()
+                            .w_full()
+                            .py(px(theme::SP_6))
+                            .rounded(px(theme::RADIUS_MD))
+                            .border_1()
+                            .border_color(theme::HAIRLINE)
+                            .child(icons::icon(
+                                icons::paths::CONSOLE,
+                                28.0,
+                                theme::TEXT_DISABLED,
+                            ))
+                            .child(
+                                div()
+                                    .text_size(px(theme::SIZE_HEADLINE))
+                                    .font_weight(FontWeight(theme::WEIGHT_HEADLINE))
+                                    .text_color(theme::TEXT_PRIMARY)
+                                    .child("No recent sessions"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(theme::SIZE_CAPTION))
+                                    .text_color(theme::TEXT_SECONDARY)
+                                    .child(
+                                        "Your play history will appear here once you connect.",
+                                    ),
+                            ),
+                    ),
+            ),
+        )
+        // Tips & Guides: statischer Einsteiger-Tipp mit Swoosh-Thumb.
+        .child(
+            div().flex_1().min_w_0().child(
+                Card::new("tips-guides")
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(icons::icon(
+                                icons::paths::LIGHTBULB,
+                                16.0,
+                                theme::ACCENT_SOFT,
+                            ))
+                            .child(
+                                div()
+                                    .text_size(px(theme::SIZE_HEADLINE))
+                                    .font_weight(FontWeight(theme::WEIGHT_HEADLINE))
+                                    .text_color(theme::TEXT_PRIMARY)
+                                    .child("Tips & Guides"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(theme::SP_3))
+                            .child(
+                                gpui::img(icons::image_paths::BG_SWOOSH)
+                                    .w(px(96.0))
+                                    .h(px(56.0))
+                                    .rounded(px(theme::RADIUS_MD))
+                                    .object_fit(gpui::ObjectFit::Cover),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::SIZE_BODY))
+                                            .font_weight(FontWeight(theme::WEIGHT_HEADLINE))
+                                            .text_color(theme::TEXT_PRIMARY)
+                                            .child("Get the best experience"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::SIZE_CAPTION))
+                                            .text_color(theme::TEXT_SECONDARY)
+                                            .child(
+                                                "Use a wired connection or 5 GHz Wi-Fi for \
+                                                 lower latency and smoother gameplay.",
+                                            ),
+                                    ),
+                            ),
+                    ),
+            ),
+        )
+        .into_any_element()
+}
+
+/// Hero-Karte (ui-v3): PS5-Render links, Name/Status/Metadaten in der
+/// Mitte, Connect + Kebab-Menü rechts mit Zitat. Rechtsklick öffnet wie
+/// bei den Kacheln das Kontextmenü. Hero = erste Konsole (Discovery-
+/// Reihenfolge); der auto_connect-Proxy des alten Designs entfällt.
 fn hero_card(
     index: usize,
     entry: &ConsoleEntry,
     focus: FocusHandle,
     cx: &mut Context<AppShell>,
-) -> Card {
+) -> gpui::AnyElement {
+    let menu_entry_kebab = entry.clone();
+    let menu_entry_right = entry.clone();
     let click_entry = entry.clone();
-    let context_line = format!(
-        "{}  ·  {}",
-        if entry.ps5 { "PlayStation 5" } else { "PlayStation 4" },
-        if entry.addr.is_empty() { "PSN remote" } else { entry.addr.as_str() },
-    );
-    Card::new(("hero", index))
-        .hero()
+
+    let meta_row = |icon: &'static str, text: String| {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(icons::icon(icon, 14.0, theme::TEXT_SECONDARY))
+            .child(
+                div()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(theme::SIZE_CAPTION))
+                    .text_color(theme::TEXT_SECONDARY)
+                    .child(text),
+            )
+    };
+
+    div()
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |shell, _ev, _window, cx| {
+                open_host_menu(shell, &menu_entry_right, cx)
+            }),
+        )
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(theme::SP_5))
-                .child(icons::icon(icons::paths::CONSOLE, 64.0, theme::ACCENT))
+            Card::new(("hero", index))
+                .hero()
+                .focus_handle(focus.clone())
                 .child(
                     div()
                         .flex()
-                        .flex_col()
-                        .gap_2()
-                        .flex_1()
-                        .child(StatusBadge::new(entry.status).label(entry.status_label))
+                        .items_center()
+                        .gap(px(theme::SP_6))
+                        // PS5-Render (Prototyp-Asset).
                         .child(
-                            div()
-                                // Einzeilig halten; gpui-0.2.2-Quirk: siehe
-                                // console_tile (text_ellipsis ellipsiert in
-                                // Flex-Spalten verfrüht) → nur Clip.
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_size(px(theme::SIZE_DISPLAY))
-                                .font_weight(FontWeight(theme::WEIGHT_DISPLAY))
-                                .text_color(theme::TEXT_PRIMARY)
-                                .child(entry.name.clone()),
+                            gpui::img(icons::image_paths::PS5)
+                                .h(px(170.0))
+                                .w(px(190.0))
+                                .flex_none()
+                                .object_fit(gpui::ObjectFit::Contain),
                         )
                         .child(
                             div()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_size(px(theme::SIZE_CAPTION))
-                                .text_color(theme::TEXT_SECONDARY)
-                                .child(context_line),
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .flex_1()
+                                .min_w_0()
+                                .child(SectionLabel::new("Your console"))
+                                .child(
+                                    div()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_size(px(theme::SIZE_DISPLAY))
+                                        .font_weight(FontWeight(theme::WEIGHT_DISPLAY))
+                                        .text_color(theme::TEXT_PRIMARY)
+                                        .child(entry.name.clone()),
+                                )
+                                .child(
+                                    div().flex().flex_row().child(
+                                        StatusBadge::new(entry.status).label(entry.status_label),
+                                    ),
+                                )
+                                .child(meta_row(
+                                    icons::paths::MAP_PIN,
+                                    if entry.addr.is_empty() {
+                                        "PSN remote".to_string()
+                                    } else {
+                                        entry.addr.clone()
+                                    },
+                                ))
+                                .child(meta_row(
+                                    icons::paths::PULSE,
+                                    entry
+                                        .running_app
+                                        .clone()
+                                        .unwrap_or_else(|| match entry.status {
+                                            StatusKind::Ready => "Good connection".to_string(),
+                                            StatusKind::Standby => {
+                                                "In standby — connect to wake it up".to_string()
+                                            }
+                                            StatusKind::Offline => {
+                                                "Offline — not responding to discovery"
+                                                    .to_string()
+                                                }
+                                            StatusKind::Unregistered => {
+                                                "Not registered to this account".to_string()
+                                            }
+                                        }),
+                                ))
+                                .child(
+                                    // Row-Wrapper: gpui 0.2.2 kennt kein align-self —
+                                    // in einer Row behält der Button seine Inhaltsbreite.
+                                    div().flex().flex_row().child(
+                                        Button::new("hero-connect", "Connect")
+                                            .variant(ButtonVariant::Primary)
+                                            .focus_handle(focus)
+                                            .on_click(cx.listener(move |shell, _ev, _window, cx| {
+                                                connect_entry(shell, &click_entry, cx)
+                                            })),
+                                    ),
+                                ),
+                        )
+                        .child(
+                            // Rechte Spalte: Kebab-Menü oben, Zitat unten.
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_end()
+                                .justify_between()
+                                .h_full()
+                                .child(
+                                    div()
+                                        .id("hero-menu")
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size(px(32.0))
+                                        .rounded(px(theme::RADIUS_MD))
+                                        .border_1()
+                                        .border_color(theme::HAIRLINE)
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme::SURFACE2))
+                                        .on_click(cx.listener(
+                                            move |shell, _ev, _window, cx| {
+                                                open_host_menu(shell, &menu_entry_kebab, cx)
+                                            },
+                                        ))
+                                        .child(icons::icon(
+                                            icons::paths::MORE,
+                                            16.0,
+                                            theme::TEXT_SECONDARY,
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(150.0))
+                                        .italic()
+                                        .text_size(px(theme::SIZE_HEADLINE))
+                                        .text_color(theme::TEXT_SECONDARY)
+                                        .child("“Great games travel further.”"),
+                                ),
                         ),
-                )
-                .child(
-                    Button::new("hero-connect", "Connect")
-                        .variant(ButtonVariant::Primary)
-                        .focus_handle(focus)
-                        .on_click(cx.listener(move |shell, _ev, _window, cx| {
-                            connect_entry(shell, &click_entry, cx)
-                        })),
                 ),
         )
+        .into_any_element()
 }
 
 #[cfg(test)]

@@ -28,6 +28,14 @@ pub mod paths {
     pub const EDIT: &str = "icons/edit.svg";
     pub const TRASH: &str = "icons/trash.svg";
     pub const PULSE: &str = "icons/pulse.svg";
+    pub const LINK: &str = "icons/link.svg";
+    pub const USER_PLUS: &str = "icons/user-plus.svg";
+    pub const NETWORK: &str = "icons/network.svg";
+    pub const MAP_PIN: &str = "icons/map-pin.svg";
+    pub const CLOCK: &str = "icons/clock.svg";
+    pub const LIGHTBULB: &str = "icons/lightbulb.svg";
+    pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
+    pub const MORE: &str = "icons/more-horizontal.svg";
 }
 
 const ICON_HOME: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>"##;
@@ -44,6 +52,14 @@ const ICON_GLOBE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 
 const ICON_EDIT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>"##;
 const ICON_TRASH: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>"##;
 const ICON_PULSE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>"##;
+const ICON_LINK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>"##;
+const ICON_USER_PLUS: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="22" x2="16" y1="11" y2="11"/></svg>"##;
+const ICON_NETWORK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><line x1="12" x2="12" y1="8" y2="12"/></svg>"##;
+const ICON_MAP_PIN: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>"##;
+const ICON_CLOCK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>"##;
+const ICON_LIGHTBULB: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>"##;
+const ICON_CHEVRON_RIGHT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"##;
+const ICON_MORE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>"##;
 
 /// Alle Icons: Pfad → SVG-Quelltext.
 pub static ICONS: &[(&str, &str)] = &[
@@ -61,6 +77,32 @@ pub static ICONS: &[(&str, &str)] = &[
     (paths::EDIT, ICON_EDIT),
     (paths::TRASH, ICON_TRASH),
     (paths::PULSE, ICON_PULSE),
+    (paths::LINK, ICON_LINK),
+    (paths::USER_PLUS, ICON_USER_PLUS),
+    (paths::NETWORK, ICON_NETWORK),
+    (paths::MAP_PIN, ICON_MAP_PIN),
+    (paths::CLOCK, ICON_CLOCK),
+    (paths::LIGHTBULB, ICON_LIGHTBULB),
+    (paths::CHEVRON_RIGHT, ICON_CHEVRON_RIGHT),
+    (paths::MORE, ICON_MORE),
+];
+
+/// Eingebettete Raster-Bilder (Prototyp-Assets): Pfad → PNG-Bytes.
+pub mod image_paths {
+    pub const BG_SWOOSH: &str = "images/bg-swoosh.png";
+    pub const PS5: &str = "images/ps5.png";
+    pub const LOGO: &str = "images/logo.png";
+}
+
+static IMAGE_BG_SWOOSH: &[u8] = include_bytes!("../assets/bg-swoosh.png");
+static IMAGE_PS5: &[u8] = include_bytes!("../assets/ps5.png");
+static IMAGE_LOGO: &[u8] = include_bytes!("../assets/logo.png");
+
+/// Alle Raster-Bilder: Pfad → PNG-Bytes.
+pub static IMAGES: &[(&str, &[u8])] = &[
+    (image_paths::BG_SWOOSH, IMAGE_BG_SWOOSH),
+    (image_paths::PS5, IMAGE_PS5),
+    (image_paths::LOGO, IMAGE_LOGO),
 ];
 
 /// gpui-`AssetSource`, die nur die eingebetteten Icons kennt.
@@ -68,11 +110,13 @@ pub struct IconAssets;
 
 impl gpui::AssetSource for IconAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
-        Ok(
-            ICONS.iter().find(|(p, _)| *p == path).map(|(_, src)| {
-                Cow::Borrowed(src.as_bytes())
-            }),
-        )
+        if let Some((_, src)) = ICONS.iter().find(|(p, _)| *p == path) {
+            return Ok(Some(Cow::Borrowed(src.as_bytes())));
+        }
+        if let Some((_, bytes)) = IMAGES.iter().find(|(p, _)| *p == path) {
+            return Ok(Some(Cow::Borrowed(*bytes)));
+        }
+        Ok(None)
     }
 
     fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {

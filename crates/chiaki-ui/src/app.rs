@@ -9,12 +9,14 @@
 use std::time::Duration;
 
 use gpui::{
-    div, px, App, Context, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement, Render, Styled, Window,
+    div, px, App, Context, FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement,
+    KeyDownEvent, ParentElement as _, Render, StatefulInteractiveElement as _, Styled,
+    StyledImage as _, Window,
+    prelude::FluentBuilder as _,
 };
 
 use crate::backend::{Backend, HostId, UiEvent};
-use crate::components::{Dialog, IconButton, ModalLayer, ToastData, ToastId, ToastView};
+use crate::components::{Dialog, ModalLayer, ToastData, ToastId, ToastView};
 use crate::icons;
 use crate::motion::{self, Transition};
 use crate::pages;
@@ -72,6 +74,9 @@ pub struct AppShell {
     pub shell_focus: FocusHandle,
     /// Fokus-Handles der NavRail-Einträge (parallel zu Route::nav_items()).
     pub rail_focus: Vec<FocusHandle>,
+    /// Home-Suchfeld (Filter für die Konsolen-Kacheln; ui-v3-Prototyp).
+    pub home_search: String,
+    pub home_search_focus: FocusHandle,
 }
 
 impl AppShell {
@@ -103,6 +108,8 @@ impl AppShell {
             next_toast_id: 1,
             shell_focus: cx.focus_handle(),
             rail_focus,
+            home_search: String::new(),
+            home_search_focus: cx.focus_handle(),
         }
     }
 
@@ -418,15 +425,10 @@ impl Render for AppShell {
 
         // GPU-Stream-Modus: Shell-Hintergrund transparent, damit das Video-
         // Fenster unter der gpui-Surface sichtbar bleibt (Stream-Seite malt
-        // ihren Bereich selbst; außerhalb des Streams bleibt theme::BG).
-        let shell_bg = if cx
-            .has_global::<crate::pages::stream::state::StreamUiState>()
-            && cx.global::<crate::pages::stream::state::StreamUiState>().gpu_active()
-        {
-            gpui::transparent_black()
-        } else {
-            theme::BG
-        };
+        // ihren Bereich selbst; außerhalb des Streams BG + Swoosh-Artwork).
+        let gpu_stream = cx.has_global::<crate::pages::stream::state::StreamUiState>()
+            && cx.global::<crate::pages::stream::state::StreamUiState>().gpu_active();
+        let shell_bg = if gpu_stream { gpui::transparent_black() } else { theme::BG };
         div()
             .id("shell")
             .size_full()
@@ -441,11 +443,34 @@ impl Render for AppShell {
             .on_key_down(cx.listener(Self::handle_key))
             .child(nav)
             .child(
+                // Content-Spalte: im Nicht-Stream-Modus liegt das Swoosh-
+                // Artwork (Prototyp-Hintergrund) unter dem Seiteninhalt.
                 div()
+                    .relative()
                     .flex_1()
                     .overflow_hidden()
+                    .when(matches!(self.route, Route::Home), |el| {
+                        // Das Artwork gehört zur Home-Landing (Prototyp) —
+                        // auf Arbeitsseiten (Settings etc.) bleibt der
+                        // Hintergrund ruhig wegen der Textdichte.
+                        el.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .child(
+                                    gpui::img(icons::image_paths::BG_SWOOSH)
+                                        .size_full()
+                                        .object_fit(gpui::ObjectFit::Cover)
+                                        // Zusätzlich leicht abgedimmt: das
+                                        // Asset ist vorgeblurt, die Deckkraft
+                                        // hält den Hintergrund dezent.
+                                        .opacity(0.7),
+                                ),
+                        )
+                    })
                     .child(
                         div()
+                            .relative()
                             .size_full()
                             .opacity(progress)
                             .ml(px(slide_px))
@@ -467,6 +492,8 @@ impl Render for AppShell {
 }
 
 impl AppShell {
+    /// Sidebar (ui-v3-Prototyp): Logo-Block, Pill-Navigation, unten das
+    /// „Play Anywhere“-Branding mit Version.
     fn render_nav_rail(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let items = Route::nav_items();
         let buttons: Vec<gpui::AnyElement> = items
@@ -475,9 +502,36 @@ impl AppShell {
             .map(|(i, (route, icon, label))| {
                 let active = self.route == route;
                 let focus = self.rail_focus[i].clone();
-                IconButton::new(("rail", i), icon, label)
-                    .active(active)
-                    .focus_handle(focus)
+                let row = div()
+                    .id(("rail", i))
+                    .flex()
+                    .items_center()
+                    .gap(px(theme::SP_3))
+                    .w_full()
+                    .px(px(theme::SP_3))
+                    .h(px(40.0))
+                    .rounded(px(theme::RADIUS_MD))
+                    .text_color(if active { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY })
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::SURFACE2).text_color(theme::TEXT_PRIMARY))
+                    .child(icons::icon(
+                        icon,
+                        18.0,
+                        if active { theme::ACCENT_SOFT } else { theme::TEXT_SECONDARY },
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(theme::SIZE_BODY))
+                            .font_weight(FontWeight(if active { 600.0 } else { 400.0 }))
+                            .child(label),
+                    );
+                let row = if active {
+                    row.bg(theme::ACCENT)
+                } else {
+                    row
+                };
+                row.id(("rail", i))
+                    .track_focus(&focus)
                     .on_click(cx.listener(move |shell, _ev, _window, cx| {
                         shell.navigate(route.clone(), cx);
                     }))
@@ -486,25 +540,73 @@ impl AppShell {
             .collect();
 
         div()
-            .w(px(88.0))
+            .w(px(220.0))
             .h_full()
+            .flex_none()
             .flex()
             .flex_col()
-            .items_center()
-            .gap_2()
-            .pt(px(theme::SP_4))
-            .bg(theme::SURFACE)
+            .px(px(theme::SP_4))
+            .pt(px(theme::SP_5))
+            .pb(px(theme::SP_4))
+            .bg(theme::SIDEBAR)
             .border_r_1()
             .border_color(theme::HAIRLINE)
+            // Logo-Block.
             .child(
                 div()
-                    .text_size(px(18.0))
-                    .font_weight(gpui::FontWeight(theme::WEIGHT_DISPLAY))
-                    .text_color(theme::ACCENT)
-                    .mb_3()
-                    .child("CHIAKI"),
+                    .flex()
+                    .items_center()
+                    .gap(px(theme::SP_3))
+                    .px(px(theme::SP_2))
+                    .mb(px(theme::SP_6))
+                    .child(
+                        gpui::img(icons::image_paths::LOGO)
+                            .w(px(36.0))
+                            .h(px(36.0))
+                            .object_fit(gpui::ObjectFit::Contain),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_0()
+                            .child(
+                                div()
+                                    .text_size(px(20.0))
+                                    .font_weight(FontWeight(theme::WEIGHT_DISPLAY))
+                                    .text_color(theme::ACCENT_SOFT)
+                                    .child("CHIAKI"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(theme::SIZE_CAPTION))
+                                    .text_color(theme::TEXT_SECONDARY)
+                                    .child("PS Remote Play Client"),
+                            ),
+                    ),
             )
-            .children(buttons)
+            .child(div().flex().flex_col().gap_1().children(buttons))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px(px(theme::SP_2))
+                    .child(
+                        div()
+                            .text_size(px(theme::SIZE_BODY))
+                            .font_weight(FontWeight(theme::WEIGHT_TITLE))
+                            .text_color(theme::TEXT_PRIMARY)
+                            .child("Play Anywhere"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(theme::SIZE_CAPTION))
+                            .text_color(theme::TEXT_DISABLED)
+                            .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                    ),
+            )
             .into_any_element()
     }
 }
