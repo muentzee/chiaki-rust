@@ -73,6 +73,7 @@ pub fn run(profile: Option<String>) -> gpui::Result<()> {
         let shell: gpui::Entity<AppShell> = cx.new(|cx| AppShell::new(backend.clone(), cx));
 
         let backend_for_close = backend.clone();
+        let shell_for_close = shell.downgrade();
         let bounds = Bounds::centered(None, gpui::size(px(1280.0), px(800.0)), cx);
         cx.open_window(
             WindowOptions {
@@ -90,17 +91,28 @@ pub fn run(profile: Option<String>) -> gpui::Result<()> {
                 // dafür nur 100 ms (gpui SHUTDOWN_TIMEOUT). Läuft beim Schließen
                 // noch eine Session, würden Media-/GPU-Sink-Threads hart im
                 // Prozess-Teardown sterben (D3D11/CUDA-Aufrufe im Entladen —
-                // beobachteter stiller Absturz). Deshalb: WM_CLOSE fängt das
-                // Fenster hier ab, fährt das Backend **synchron und bounded**
-                // herunter und lässt erst dann das Schließen zu.
+                // beobachteter stiller Absturz).
+                //
+                // X im STREAM (User-Wunsch 12.09.): die App schließt gar
+                // nicht erst — der Stream fährt sauber herunter (navigate →
+                // pages::stream::shutdown) und die UI kommt zurück. Der alte
+                // Weg (Fenster-/Prozess-Teardown während laufendem Stream)
+                // freezte und crashte zuverlässig.
                 window.on_window_should_close(cx, move |_window, cx| {
-                    // Stream-Global zuerst entfernen (Fake-Thread etc.) —
-                    // der Zustand gehört zum Fenster, nicht zur Session.
-                    if cx.has_global::<crate::pages::stream::state::StreamUiState>() {
-                        let mut state =
-                            cx.remove_global::<crate::pages::stream::state::StreamUiState>();
-                        state.stop_threads();
+                    let in_stream = shell_for_close
+                        .read_with(cx, |sh, _| {
+                            matches!(sh.route, crate::app::Route::Stream(_))
+                        })
+                        .unwrap_or(false);
+                    if in_stream {
+                        shell_for_close.update(cx, |sh, cx| {
+                            // navigate() löst pages::stream::shutdown() aus:
+                            // Session-Stop + Stream-Global + Fake-Threads.
+                            sh.navigate(crate::app::Route::Home, cx);
+                        });
+                        return false; // Fenster bleibt offen.
                     }
+                    // Kein Stream: Schließen = App-Ende; bounded Teardown zuerst.
                     backend_for_close.shutdown_bounded(Duration::from_secs(4));
                     true
                 });
