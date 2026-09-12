@@ -144,6 +144,12 @@ pub struct StreamTelemetry {
     pub audio_fill_ms_x10: AtomicU32,
     /// Audio-Underflows (Stille wegen leerem Ring).
     pub audio_underflows: AtomicU64,
+    /// Ring-Zähler des AudioOutput (Audio-Thread schreibt, Media-Log liest):
+    /// gepushte/gezogene Samples, Latenz-Guard-Clears, verworfene Samples.
+    pub audio_pushed: AtomicU64,
+    pub audio_pulled: AtomicU64,
+    pub audio_clears: AtomicU64,
+    pub audio_dropped: AtomicU64,
     /// RTT in ms ×10 — Quelle: FAKE-Telemetrie (fake.rs); der echte Wert
     /// kommt als direkter Poll aus `Session::rtt_us()` (Senkusha-RTT,
     /// StreamUiState::update_stats) und umgeht dieses Feld.
@@ -187,21 +193,29 @@ impl StreamTelemetry {
 
 /// Befehle an den Media-Thread (von den Session-Callbacks geschrieben).
 pub(crate) enum MediaCmd {
-    /// Rohes Opus-Audioframe (leer = Concealment).
-    Audio(Vec<u8>),
     /// Rohes Haptics-Frame (10 ms @ 3 kHz Stereo S16).
     Haptics(Vec<u8>),
-    /// `SessionEvent::AudioStreamInfo` — AudioOutput + OpusDecoder aufbauen.
-    AudioHeader(AudioHeader),
     /// `SessionEvent::Connected` — Haptics/Mic-Start.
     Connected,
     /// Mic-Mute-Umschaltung (Einblend-Panel).
     MicUnmuted(bool),
     /// Wake-only: Ein Video-Frame landete im VideoSlot. Ohne dieses Signal
-    /// läuft der Media-Loop bis zu 10 ms weiter (Audio-Takt/recv-Timeout),
+    /// läuft der Media-Loop bis zum nächsten Audio-Paket/recv-Timeout,
     /// bevor der Frame dekodiert wird — das überlagert der Anzeige Eigen-
     /// Jitter, der nicht vom Netzwerk stammt.
     Video,
+}
+
+/// Befehle für den dedizierten Audio-Thread (C++-Vorbild: Audio läuft
+/// unabhängig vom Video-Thread — Dekodieren+Pushen darf durch Kamera-/
+/// VSR-Last nicht zu Bündeln gestaucht werden, sonst zündet der 3×-Latenz-
+/// Guard des Rings und der Ton hackt; Regression 12.09.: ~55 Guard-Schnitte
+/// pro Minute mit aktiver 4K-Kamera statt 1–9/min).
+pub(crate) enum AudioStreamCmd {
+    /// `SessionEvent::AudioStreamInfo` — OpusDecoder + AudioOutput aufbauen.
+    Header(AudioHeader),
+    /// Rohes Opus-Audioframe (leer = Concealment).
+    Packet(Vec<u8>),
 }
 
 /// Bounded FIFO für empfangene (kodierte) Frames. H.265/H.264 referenziert
@@ -1034,6 +1048,10 @@ impl SessionManager {
         let telemetry = StreamTelemetry::new();
         telemetry.vsr_scale.store(media.nv_vsr_scale, Ordering::Relaxed);
         let (media_tx, media_rx) = std::sync::mpsc::channel::<MediaCmd>();
+        // Dedizierter Audio-Pfad (C++-Vorbild): Dekodieren+Pushen läuft
+        // unabhängig vom Media-Loop, damit Kamera-/VSR-Last die Zuleitung
+        // nicht staucht (Regression 12.09., siehe AudioStreamCmd).
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel::<AudioStreamCmd>();
 
         let shared = Arc::new(SessionShared {
             session: Mutex::new(None),
@@ -1050,12 +1068,23 @@ impl SessionManager {
             shared: Arc::clone(&shared),
             telemetry: Arc::clone(&telemetry),
             feedback: self.feedback_sink(),
+            audio_tx,
         });
 
         let mut session = Session::new(connect_info, callbacks)?;
         session.start()?;
 
         *lock(shared.session.lock()) = Some(session);
+
+        // Dedizierter Audio-Thread (Opus → Ring; Endet, wenn der Kanal
+        // mit dem Session-Teardown geschlossen wird).
+        media::spawn_audio_thread(
+            audio_rx,
+            Arc::clone(&telemetry),
+            media.audio_out_device.clone(),
+            media.audio_buffer_size,
+            media.audio_volume,
+        );
 
         // Media-Thread (besitzt Decoder/VSR/Audio/Haptics/Mic — siehe
         // Modul-Doku). Er endet, wenn der Cmd-Kanal geschlossen wird.
@@ -1547,6 +1576,8 @@ struct BridgeCallbacks {
     shared: Arc<SessionShared>,
     telemetry: Arc<StreamTelemetry>,
     feedback: Option<FeedbackSink>,
+    /// Dedizierter Audio-Kanal (Audio-Thread, nicht der Media-Loop).
+    audio_tx: std::sync::mpsc::Sender<AudioStreamCmd>,
 }
 
 impl BridgeCallbacks {
@@ -1587,15 +1618,16 @@ impl SessionCallbacks for BridgeCallbacks {
     }
 
     fn audio_pcm(&self, pcm: &[u8]) {
-        // Rohe Opus-Frames (leer = Concealment) — Dekodierung im Media-Thread.
-        let _ = self.send_media(MediaCmd::Audio(pcm.to_vec()));
+        // Rohe Opus-Frames (leer = Concealment) — Dekodierung+Push im
+        // dedizierten Audio-Thread (unabhängig von Video-/Kamera-Last).
+        let _ = self.audio_tx.send(AudioStreamCmd::Packet(pcm.to_vec()));
     }
 
     fn event(&self, ev: SessionEvent) {
         // Media-/Feedback-relevante Events zusätzlich weiterleiten.
         match &ev {
             SessionEvent::AudioStreamInfo(header) => {
-                let _ = self.send_media(MediaCmd::AudioHeader(*header));
+                let _ = self.audio_tx.send(AudioStreamCmd::Header(*header));
             }
             SessionEvent::Connected => {
                 let _ = self.send_media(MediaCmd::Connected);
@@ -1656,10 +1688,90 @@ struct MediaTimings {
 }
 
 
-    use super::{haptics_rumble_fallback, ActiveSession, FeedbackCmd, FeedbackSink, GpuPathKind, MediaCmd, MediaSettings};
+    use super::{haptics_rumble_fallback, ActiveSession, FeedbackCmd, FeedbackSink, GpuPathKind, MediaCmd, MediaSettings, AudioStreamCmd};
     use chiaki_core::ChiakiResult;
     use chiaki_input::HapticsPlayer;
     use windows::core::Interface as _;
+
+    /// Dedizierter Audio-Thread (C++-Vorbild: `audio_sample_cb` dekodiert
+    /// und pusht unabhängig vom Video-Thread). Endet, wenn der Kanal mit
+    /// dem Session-Teardown geschlossen wird; der AudioOutput räumt dann
+    /// **auf diesem Thread** ab (!Send-Vertrag von cpal).
+    pub(crate) fn spawn_audio_thread(
+        rx: std::sync::mpsc::Receiver<super::AudioStreamCmd>,
+        telemetry: std::sync::Arc<super::StreamTelemetry>,
+        device: Option<String>,
+        buffer_size: u32,
+        volume: u32,
+    ) {
+        std::thread::Builder::new()
+            .name("chiaki-ui-media-audio".into())
+            .spawn(move || {
+                let mut opus = OpusAudioDecoder::new();
+                let mut audio_out: Option<AudioOutput> = None;
+                loop {
+                    let cmd = match rx.recv() {
+                        Ok(cmd) => cmd,
+                        Err(_) => break, // Session-Teardown (Sender weg).
+                    };
+                    match cmd {
+                        AudioStreamCmd::Header(header) => {
+                            if let Err(err) = opus.set_header(header) {
+                                tracing::error!("OpusDecoder-Init fehlgeschlagen: {err:?}");
+                                continue;
+                            }
+                            match AudioOutput::new(
+                                device.as_deref(),
+                                u32::from(header.rate),
+                                u16::from(header.channels),
+                                buffer_size,
+                            ) {
+                                Ok(out) => {
+                                    out.set_volume(volume as f32 / 128.0);
+                                    tracing::info!(
+                                        "Audio-Ausgabe '{}' (Puffer-Ziel {} Bytes, Volume {}/128)",
+                                        out.device_name(),
+                                        buffer_size,
+                                        volume
+                                    );
+                                    audio_out = Some(out);
+                                }
+                                Err(err) => {
+                                    tracing::error!("AudioOutput-Init fehlgeschlagen: {err:?}")
+                                }
+                            }
+                        }
+                        AudioStreamCmd::Packet(packet) => {
+                            // Dekodieren (leeres Paket = Concealment), dann pushen.
+                            if let Ok(pcm) = opus.decode_frame(&packet) {
+                                if let Some(out) = &audio_out {
+                                    out.push(pcm);
+                                    telemetry
+                                        .audio_fill_ms_x10
+                                        .store((out.current_buffer_fill_ms() * 10.0) as u32, Ordering::Relaxed);
+                                    telemetry
+                                        .audio_underflows
+                                        .store(out.underflows(), Ordering::Relaxed);
+                                    telemetry
+                                        .audio_pushed
+                                        .store(out.pushed_samples(), Ordering::Relaxed);
+                                    telemetry
+                                        .audio_pulled
+                                        .store(out.pulled_samples(), Ordering::Relaxed);
+                                    telemetry
+                                        .audio_clears
+                                        .store(out.clears(), Ordering::Relaxed);
+                                    telemetry
+                                        .audio_dropped
+                                        .store(out.dropped_samples(), Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .expect("Audio-Thread starten");
+    }
     use chiaki_media::cuda_d3d11::CudaD3d11Interop;
     use chiaki_media::d3d11_copy::D3d11Nv12Downloader;
     use chiaki_media::decoder::{DecodedFrame, DecoderOpts, FrameMemory, HwBackend};
@@ -1792,11 +1904,10 @@ struct MediaTimings {
         let mut prev_audio_pulled: u64 = 0;
         let mut prev_audio_clears: u64 = 0;
 
-        // --- Audio (OpusDecoder + Output entstehen mit dem AudioHeader) ---
-        let mut opus = OpusAudioDecoder::new();
-        let mut audio_out: Option<AudioOutput> = None;
-
         // --- Haptics/Mic ---
+        // (Audio läuft seit dem 12.09.-Fix im dedizierten Audio-Thread —
+        // siehe spawn_audio_thread; Grund: Kamera-/VSR-Last stauchte die
+        // Audio-Zuleitung im Media-Loop zu Bündeln → Latenz-Guard-Schnitte.)
         let mut haptics: Option<HapticsPlayer> = None;
         let mut mic: Option<AudioInput> = None;
 
@@ -1815,46 +1926,6 @@ struct MediaTimings {
 
         loop {
             match rx.recv_timeout(Duration::from_millis(5)) {
-                Ok(MediaCmd::AudioHeader(header)) => {
-                    if let Err(err) = opus.set_header(header) {
-                        tracing::error!("OpusDecoder-Init fehlgeschlagen: {err:?}");
-                        continue;
-                    }
-                    match AudioOutput::new(
-                        settings.audio_out_device.as_deref(),
-                        u32::from(header.rate),
-                        u16::from(header.channels),
-                        settings.audio_buffer_size,
-                    ) {
-                        Ok(out) => {
-                            out.set_volume(settings.audio_volume as f32 / 128.0);
-                            tracing::info!(
-                                "Audio-Ausgabe '{}' (Puffer-Ziel {} Bytes, Volume {}/128)",
-                                out.device_name(),
-                                settings.audio_buffer_size,
-                                settings.audio_volume
-                            );
-                            audio_out = Some(out);
-                        }
-                        Err(err) => tracing::error!("AudioOutput-Init fehlgeschlagen: {err:?}"),
-                    }
-                }
-                Ok(MediaCmd::Audio(packet)) => {
-                    // Dekodieren (leeres Paket = Concealment), dann pushen.
-                    if let Ok(pcm) = opus.decode_frame(&packet) {
-                        if let Some(out) = &audio_out {
-                            out.push(pcm);
-                            session
-                                .telemetry
-                                .audio_fill_ms_x10
-                                .store((out.current_buffer_fill_ms() * 10.0) as u32, Ordering::Relaxed);
-                            session
-                                .telemetry
-                                .audio_underflows
-                                .store(out.underflows(), Ordering::Relaxed);
-                        }
-                    }
-                }
                 Ok(MediaCmd::Connected) => {
                     // Haptics-Ausgabe (C++: InitHaptics/ConnectHaptics).
                     if haptics.is_none() {
@@ -2445,21 +2516,25 @@ struct MediaTimings {
                     // Audio-Bilanz (HANDOFF P1): pushed vs. pulled je Fenster.
                     // pushed > pulled dauerhaft = Überproduktion; pulled im
                     // Rückstand mit Clears = Konsum-Stalls (Gerät/Treiber).
-                    let audio_line = audio_out.as_ref().map(|out| {
-                        let pushed = out.pushed_samples();
-                        let pulled = out.pulled_samples();
-                        let clears = out.clears();
+                    // Zähler kommen aus der Telemetrie (Audio-Thread spiegelt
+                    // sie nach jedem Push — der Ring lebt nicht mehr auf
+                    // diesem Thread).
+                    let audio_line = {
+                        let pushed = session.telemetry.audio_pushed.load(Ordering::Relaxed);
+                        let pulled = session.telemetry.audio_pulled.load(Ordering::Relaxed);
+                        let clears = session.telemetry.audio_clears.load(Ordering::Relaxed);
+                        let fill = session.telemetry.audio_fill_ms_x10.load(Ordering::Relaxed);
                         format!(
                             " | Audio: fill {:.1} ms, push Δ+{}, pull Δ+{} ({} Samples), clears Δ{}, underflows {}, dropped {}",
-                            out.current_buffer_fill_ms(),
+                            fill as f32 / 10.0,
                             pushed.saturating_sub(prev_audio_pushed),
                             pulled.saturating_sub(prev_audio_pulled),
                             pulled.saturating_sub(prev_audio_pulled) / 2,
                             clears.saturating_sub(prev_audio_clears),
-                            out.underflows(),
-                            out.dropped_samples(),
+                            session.telemetry.audio_underflows.load(Ordering::Relaxed),
+                            session.telemetry.audio_dropped.load(Ordering::Relaxed),
                         )
-                    });
+                    };
                     // Virtual-Cam-Feed: kumulative Zähler + Format.
                     let cam_line = cam.as_ref().map(|f| {
                         format!(
@@ -2484,18 +2559,16 @@ struct MediaTimings {
                         snap.frames_dropped.saturating_sub(prev_dropped),
                         slot_dropped.saturating_sub(prev_slot_dropped),
                         sink_line.unwrap_or_default(),
-                        audio_line.unwrap_or_default(),
+                        audio_line,
                         cam_line.unwrap_or_default(),
                     );
                     prev_presented = snap.frames_presented;
                     prev_generated = snap.frames_generated;
                     prev_dropped = snap.frames_dropped;
                     prev_slot_dropped = slot_dropped;
-                    if let Some(out) = audio_out.as_ref() {
-                        prev_audio_pushed = out.pushed_samples();
-                        prev_audio_pulled = out.pulled_samples();
-                        prev_audio_clears = out.clears();
-                    }
+                    prev_audio_pushed = session.telemetry.audio_pushed.load(Ordering::Relaxed);
+                    prev_audio_pulled = session.telemetry.audio_pulled.load(Ordering::Relaxed);
+                    prev_audio_clears = session.telemetry.audio_clears.load(Ordering::Relaxed);
                 }
             }
         }
@@ -2512,7 +2585,8 @@ struct MediaTimings {
             drop(feed);
         }
         drop(mic); // AudioInput: Drain-Join + Capture-Stop
-        drop(audio_out); // AudioOutput: cpal-Stream stoppen
+        // AudioOutput: lebt auf dem dedizierten Audio-Thread und wird dort
+        // mit dem Kanal-Ende gestoppt (cpal-Cleanup auf demselben Thread).
         if let Some(player) = haptics {
             player.close(); // waveOut sauber schließen
         }
