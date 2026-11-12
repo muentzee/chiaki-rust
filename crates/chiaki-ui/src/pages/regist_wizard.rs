@@ -390,8 +390,20 @@ fn step_target(shell: &mut AppShell, cx: &mut Context<AppShell>) -> Card {
 // ---------------------------------------------------------------------------
 
 fn step_auth(shell: &mut AppShell, cx: &mut Context<AppShell>) -> Card {
+    let ps4_pre7 = shell.regist_wizard.target == chiaki_settings::hosts::Target::Ps4Eight;
+    // Live-Nachladen: Wenn das Feld leer ist, direkt aus den Settings lesen —
+    // ein parallel laufender PSN-Login schreibt die Account-ID dorthin, und
+    // der Wizard übernimmt sie beim nächsten Frame (chiaki-ng: der Login-
+    // Callback füllt das Feld im Dialog).
+    if !ps4_pre7 && shell.regist_wizard.account_id.trim().is_empty() {
+        shell.regist_wizard.account_id = shell
+            .backend
+            .settings()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .psn_account_id();
+    }
     let state = &shell.regist_wizard;
-    let ps4_pre7 = state.target == chiaki_settings::hosts::Target::Ps4Eight;
     let account = state.account_id.clone();
     let pin = state.pin.clone();
     let console_pin = state.console_pin.clone();
@@ -408,7 +420,7 @@ fn step_auth(shell: &mut AppShell, cx: &mut Context<AppShell>) -> Card {
     let account_hint = if ps4_pre7 {
         "Username (case-sensitive) — only for PS4 < 7.0."
     } else {
-        "Base64 account ID — pre-filled from the PSN sign-in."
+        "Base64 account ID — sign in to PSN below to fill it automatically."
     };
     let account_valid = if ps4_pre7 {
         !account.trim().is_empty()
@@ -434,6 +446,35 @@ fn step_auth(shell: &mut AppShell, cx: &mut Context<AppShell>) -> Card {
             .then(|| "Account ID must decode to exactly 8 Base64-encoded bytes.")
             .map(text_hint),
     ));
+
+    // PSN-Sign-in direkt im Wizard (chiaki-ng RegistDialog: Login-Button
+    // neben dem Account-Feld) — ohne ihn ist ein frischer Install mit leerem
+    // Datenordner eine Sackgasse: keine Account-ID, keine Registrierung.
+    if !ps4_pre7 {
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    crate::components::Button::new("wizard-psn-login", "Sign in to PSN")
+                        .on_click(cx.listener(|shell, _ev, _window, _cx| {
+                            crate::psn_login::start_psn_login_for_settings(
+                                shell.backend.settings().clone(),
+                                shell.backend.event_sender(),
+                            );
+                        })),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::SIZE_CAPTION))
+                        .text_color(theme::TEXT_SECONDARY)
+                        .child(
+                            "Opens the PlayStation sign-in window and fills the account ID automatically.",
+                        ),
+                ),
+        );
+    }
 
     card = card.child(auth_row(
         "wizard-pin-row",
@@ -659,6 +700,9 @@ fn status_row(status: StatusKind, text: &str, color: gpui::Hsla) -> gpui::AnyEle
 
 /// on_change-Brücke für Wizard-Textfelder: Das TextField-Callback bekommt
 /// kein AppShell — über die WeakEntity zurück zur Shell (Doku CONTRACT-UI §2).
+/// Mit `cx.notify()`, damit die Wert-Änderung neu rendert (das TextField
+/// erzwingt zusätzlich `window.refresh()` —Notify bleibt die saubere
+/// Entity-Verbindung).
 fn wizard_text_change(
     weak: &gpui::WeakEntity<AppShell>,
     f: impl Fn(&mut AppShell, String) + 'static,
@@ -666,6 +710,9 @@ fn wizard_text_change(
     let weak = weak.clone();
     Box::new(move |value, _window, cx| {
         let value = value.to_string();
-        let _ = weak.update(cx, |shell, _cx| f(shell, value));
+        let _ = weak.update(cx, |shell, cx| {
+            f(shell, value);
+            cx.notify();
+        });
     })
 }

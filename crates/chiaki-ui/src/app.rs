@@ -365,9 +365,22 @@ impl Render for AppShell {
         let progress = self.transition.as_ref().map(|t| t.progress()).unwrap_or(1.0);
         let slide_px = (1.0 - progress) * motion::SLIDE_DISTANCE_PX;
 
-        // Beim ersten Frame den Shell-Fokus setzen (Key-Dispatch).
+        // Shell-Fokus als Fallback für den globalen Key-Handler (Key-Dispatch
+        // am Shell-Root, track_focus oben). Bedingt: NUR wenn nichts anderes
+        // fokussiert ist. Ein bedingungsloses deferred focus() pro Frame — der
+        // alte Stand — hat jede Nutzer-Fokusierung (z. B. Textfeld-Klick im
+        // Registrierungs-Wizard) im nächsten Frame wieder überschrieben: Der
+        // Fokus flappte Feld ↔ Shell, der Akzent-Rahmen verschwand und
+        // Tastatureingaben landeten im Nichts (Root Cause des toten Tippens,
+        // 11/2026). Nach window.blur() (Wizard Next/Back) kehrt der
+        // Shell-Fokus so automatisch zurück und die globalen Tasten bleiben
+        // lebendig.
         let focus = self.shell_focus.clone();
-        window.defer(cx, move |window, _cx| focus.focus(window));
+        window.defer(cx, move |window, cx| {
+            if window.focused(cx).is_none() {
+                focus.focus(window);
+            }
+        });
 
         // NavRail (Spec §1.2: schmale Icon-Rail links) — im Stream entfällt
         // sie (StreamView-Agent): Video/HUD laufen fensterfüllend (Spec §2.4

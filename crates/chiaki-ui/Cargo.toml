@@ -25,6 +25,11 @@ wry = "0.44"
 # Win32-Host-Fenster des PSN-Logins (Features im Workspace definiert).
 windows.workspace = true
 
+# gpui-Testsimulation (TestAppContext/VisualTestContext) — nur für Tests,
+# ändert den Produktions-Build nicht (Features sind target-gegate).
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["test-support"] }
+
 [[bin]]
 name = "chiaki-ui"
 path = "src/bin/chiaki_ui.rs"
